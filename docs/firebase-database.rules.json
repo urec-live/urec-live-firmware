@@ -1,0 +1,21 @@
+{
+  "rules": {
+    "gym": {
+      ".read": true,
+      ".write": "auth != null && auth.uid === 'REPLACE_WITH_GATEWAY_UID'",
+      "machines": {
+        "$code": {
+          "reps": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 65535" },
+          "inUse": { ".validate": "newData.isBoolean()" }
+        }
+      },
+      "sets": {
+        "$code": {
+          "$setId": {
+            "reps": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 65535" }
+          }
+        }
+      }
+    }
+  }
+}
