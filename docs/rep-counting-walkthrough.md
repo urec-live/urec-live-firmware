@@ -336,7 +336,7 @@ The defaults are starting points: every machine and lifter is different. The bea
 |---|---|
 | `h` | help |
 | `s` | status: mode, axis, resting reading, both thresholds, phase, reps, set seq, INT1 pin level |
-| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:`, and with a magnetometer `>bx: >by: >bz:` (µT) |
+| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:`, and with a magnetometer the field in µT: `>tx: >ty: >tz:` (TMAG5273), `>lx: >ly: >lz:` (LIS2MDL) |
 | `mode stack\|paper\|lever` | load that mode's preset, then recalibrate |
 | `dl <mg>` / `dh <mg>` | count / re-arm delta |
 | `durl <n>` / `durh <n>` | count / re-arm duration in samples (20 ms each) |
@@ -578,7 +578,7 @@ Use VS Code's PlatformIO sidebar (*Project Tasks → beacon / gateway → Upload
 | Upload | `pio run -e beacon -t upload` | `pio run -e gateway -t upload` |
 | Monitor | `pio device monitor -e beacon` | `pio device monitor -e gateway` |
 | If upload fails | double-click the Feather's reset button. The red LED pulses and a `FTHR840BOOT` drive appears; upload again | install the Silicon Labs **CP210x** driver; or hold **BOOT**, tap **RESET**, release BOOT |
-| Size today | 94.6 KB RAM, 163 KB flash (79 KB of the RAM is weight sensing, [weight-sensing.md](weight-sensing.md) §6.4) | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
+| Size today | 114.6 KB RAM, 169 KB flash (99 KB of the RAM is weight sensing, [weight-sensing.md](weight-sensing.md) §6.4) | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
 
 With both boards plugged in, `pio device list` shows the ports. Un-comment `upload_port`/`monitor_port` in `platformio.ini` if auto-detect picks the wrong board. The environment names changed from `adafruit_feather_nrf52840` to `beacon`/`gateway`. Your old `.pio/…/adafruit_feather_nrf52840` folders can be deleted, and VS Code regenerates `launch.json` itself.
 
@@ -592,7 +592,7 @@ mode stack, axis auto -> z, rest 1008 mg (x 16, y -32, z 1008)
   rearm: |a| > 1072 mg for 2 samples (40 ms)
   hold-off 350 ms, min rep interval 600 ms, set timeout 5000 ms
 phase count, reps 0, set idle (seq 142), INT1 pin 0
-weight: TMAG5273 at 0x35, 0 weights taught (0 reps)
+weight: TMAG5273 at 0x35, 0 weights taught (0 reps); LIS2MDL at 0x1E, 0 weights taught (0 reps)
 [rep] 1  (set seq 143)
 [rep] 2  (set seq 143)
 ...
@@ -623,7 +623,7 @@ GetMeFit gateway gw-01 (boot 3fa2c1d0)
 
 ### Unit tests
 
-`test/test_gym_core/` holds 48 Unity tests for the packet format, the rep counter, the tracker and the weight sensing ([weight-sensing.md](weight-sensing.md) §11). The rep-counting tests cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, set amend after a late packet, bumps not recorded, and the full set ring.
+`test/test_gym_core/` holds 50 Unity tests for the packet format, the rep counter, the tracker and the weight sensing ([weight-sensing.md](weight-sensing.md) §11). The rep-counting tests cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, set amend after a late packet, bumps not recorded, and the full set ring.
 
 Run them on a plugged-in board:
 

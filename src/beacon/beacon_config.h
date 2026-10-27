@@ -46,8 +46,9 @@
 // ---- Weight sensing (docs/weight-sensing.md) ---------------------------------------------------
 // W8-Scope: a magnetometer on the stack's top plate sees how many steel slabs were lifted. It plugs
 // into the LIS3DH's spare STEMMA QT socket (schematic §8). Without one, nothing below runs.
-#define BEACON_MAG_SENSOR MagSensor::Auto
+#define BEACON_MAG_SENSOR MagSensor::Auto  // Auto | Tmag5273 | Lis2mdl | Both
 #define BEACON_TMAG5273_ADDR 0x35
+#define BEACON_LIS2MDL_ADDR 0x1E
 #define BEACON_TMAG_OVERSAMPLE 4   // 32x conversions averaged per 50 Hz sample (1..5; 4 = 13.4 ms)
 #define BEACON_W8_MAX_SET_S 60     // recording buffer; a longer set keeps its last 60 s
 #define BEACON_W8_MIN_REP_MS 2000  // paper's dT between rep tops (shortened for faster counted reps)

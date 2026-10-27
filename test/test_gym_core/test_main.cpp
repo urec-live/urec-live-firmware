@@ -669,6 +669,27 @@ void test_w8_slower_first_rep_still_counts() {
   assertHeights(300.0f, 20.0f);
 }
 
+void test_w8_slow_lift_held_top_one_valley() {
+  SynSet s;  // the counted end-of-lift dip is shallower than the lowering's: still one valley per top
+  s.minJerk = true;
+  s.upS = 1.2f;
+  s.topPauseS = 0.3f;
+  s.downS = 0.7f;
+  TEST_ASSERT_TRUE_MESSAGE(runMotion(s), s_motion.error);
+  TEST_ASSERT_EQUAL_UINT32(s.reps, s_motion.valleyCount);
+  TEST_ASSERT_EQUAL_UINT32(s.reps - 1, s_motion.validCount);
+  assertHeights(300.0f, 20.0f);
+}
+
+void test_w8_long_rest_at_bottom_still_one_rep() {
+  SynSet s;  // a 2.5 s breather at the bottom after rep 2: a long window, but one lift
+  s.bottomPauseS = 2.5f;
+  s.bottomPauseMask = 0x04u;
+  TEST_ASSERT_TRUE_MESSAGE(runMotion(s), s_motion.error);
+  TEST_ASSERT_EQUAL_UINT32(s.reps - 1, s_motion.validCount);
+  assertHeights(300.0f, 20.0f);
+}
+
 void test_w8_uncounted_half_reps_do_not_merge() {
   SynSet s;  // two half reps, too shallow to count or find: a window across them is dropped
   s.minJerk = true;
@@ -956,6 +977,8 @@ void setup() {
   RUN_TEST(test_w8_top_pause_on_some_reps);
   RUN_TEST(test_w8_bottom_pause_on_some_reps);
   RUN_TEST(test_w8_slower_first_rep_still_counts);
+  RUN_TEST(test_w8_slow_lift_held_top_one_valley);
+  RUN_TEST(test_w8_long_rest_at_bottom_still_one_rep);
   RUN_TEST(test_w8_uncounted_half_reps_do_not_merge);
   RUN_TEST(test_w8_varying_range_of_motion_bounded);
   RUN_TEST(test_w8_rest_field_and_features);

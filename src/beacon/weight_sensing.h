@@ -2,10 +2,11 @@
 // Computing 2021) with a magnetometer on the LIS3DH's STEMMA QT chain. docs/weight-sensing.md
 // explains it end to end.
 //
-// While a set is active the beacon samples the accelerometer and the magnetometer at 50 Hz. When
+// While a set is active the beacon samples the accelerometer and the magnetometer(s) at 50 Hz. When
 // the set ends (the rep counter's 5 s timeout) the recording runs through the paper's pipeline
 // (lib/gym_core/src/weight_pipeline.h) and every rep votes for one of the weights taught with
-// `teach` (weight_model.h). The estimate is printed on the serial console.
+// `teach` (weight_model.h). With both a TMAG5273 and an LIS2MDL fitted, each one is classified
+// separately and the results are printed side by side.
 //
 // The same 50 Hz sampler feeds the Teleplot stream. With no magnetometer on the bus and the stream
 // off, none of this adds a timer, a wake-up or any I2C traffic to the rep counting.
@@ -15,16 +16,11 @@
 #include <Wire.h>
 
 #include "lis3dh_motion.h"
+#include "weight_settings.h"
 
 class WeightSensing {
  public:
-  struct Latest {
-    int16_t accMg[3];
-    int16_t b[3];  // 0.1 uT
-    bool bValid;
-  };
-
-  // Probes the magnetometer and loads its taught weights. flashOk: the SoftDevice is running, so
+  // Probes the magnetometers and loads their taught weights. flashOk: the SoftDevice is running, so
   // flash writes complete (they would block forever otherwise).
   void begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32_t now);
 
@@ -36,7 +32,8 @@ class WeightSensing {
   uint32_t nextSampleMs() const { return nextSampleMs_; }
   bool tick(uint32_t now);  // takes a sample when one is due; true if it did
   void setStreaming(bool on, uint32_t now);
-  const Latest& latest() const { return latest_; }
+  const int16_t* latestAccMg() const { return latestAcc_; }
+  void printStreamFields() const;  // Teleplot lines for the latest field sample(s)
 
   // Set lifecycle, driven by main.cpp from the rep counter. `blocked` is why this set must not be
   // weighed (lever mode), or nullptr.
@@ -55,13 +52,14 @@ class WeightSensing {
   void pumpDump();  // writes as much of a pending CSV dump as the USB buffer takes
 
  private:
-  enum DumpSection : uint8_t { kDumpIdle, kDumpSummary, kDumpError, kDumpRest, kDumpCounts, kDumpValleys,
-                               kDumpSegments, kDumpColumns, kDumpRows, kDumpEnd };
+  enum DumpSection : uint8_t { kDumpIdle, kDumpSummary, kDumpError, kDumpRest, kDumpMagRest, kDumpCounts,
+                               kDumpValleys, kDumpSegments, kDumpColumns, kDumpRows, kDumpEnd };
 
   void probe(uint32_t now);
   void updatePower(uint32_t now);
-  void loadModel();
-  bool saveModel();
+  bool anyPresent() const;
+  size_t featTotal() const;
+  void report(uint8_t setSeq) const;
   void printStatus() const;
   void printWeights() const;
   void startDump();
@@ -70,34 +68,26 @@ class WeightSensing {
   TwoWire* wire_ = nullptr;
   Lis3dhMotion* imu_ = nullptr;
   bool flashOk_ = false;
-  bool present_ = false;
-  bool modelLoaded_ = false;
-  bool magAwake_ = false;
-  uint8_t magFails_ = 0;
-  bool magLost_ = false;
   uint32_t lastProbeMs_ = 0;
 
   bool inSet_ = false;
   bool recording_ = false;
   bool streaming_ = false;
   bool samplerOn_ = false;
+  bool magInSet_ = false;  // a magnetometer was there when the set started
   const char* blocked_ = nullptr;
   uint32_t nextSampleMs_ = 0;
   uint32_t recordStartMs_ = 0;
-  Latest latest_ = {};
-  int16_t lastTempC10_ = 0;
+  int16_t latestAcc_[3] = {0, 0, 0};
 
-  // The last processed set (for teach, dump and the status).
+  // The last processed set (for teach, dump and the status). Per-sensor results live in the slots.
   bool haveSet_ = false;
   bool rawValid_ = false;     // the recorder still holds that set's samples (a later set reuses them)
   uint8_t lastEndedSeq_ = 0;  // the set that ended last, weighed or not
   uint8_t lastSetSeq_ = 0;
   uint16_t lastCounted_ = 0;
-  bool haveRest_ = false;
-  int16_t lastRest_[3] = {0, 0, 0};
-  size_t lastFeatN_ = 0;
   bool lastTaught_ = false;
-  const char* lastError_ = nullptr;
+  const char* motionError_ = nullptr;
   bool logAll_ = false;
 
   DumpSection dumpSection_ = kDumpIdle;

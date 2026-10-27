@@ -19,7 +19,6 @@ const uint16_t kMaxGapMs = 200;            // a longer gap between samples inval
 const float kLift5Mm = 50.0f;
 const float kMinHeightMm = 50.0f;
 const float kMinHeightFraction = 0.3f;     // of the median height: shorter segments are not reps
-const float kMaxDurationFactor = 1.75f;    // of the median rep period: longer segments are merged reps
 const int kZenithHalf = 5;                 // zenith field: mean of +/- 5 samples ...
 const int kZenithMinValid = 7;             // ... of which at least 7 valid
 const int kLift5Half = 2;
@@ -200,6 +199,31 @@ size_t fastestLowering(const float* a, const uint16_t* t, size_t s, size_t e) {
   return at;
 }
 
+// Rises of at least 5 cm in x over [s, e], with 5 cm of hysteresis: one per lift.
+size_t countLifts(const float* x, size_t s, size_t e) {
+  size_t lifts = 0;
+  bool rising = false;
+  float lo = x[s];
+  float hi = x[s];
+  for (size_t i = s; i <= e; i++) {
+    if (!rising) {
+      if (x[i] < lo) lo = x[i];
+      if (x[i] - lo >= kLift5Mm) {
+        rising = true;
+        lifts++;
+        hi = x[i];
+      }
+    } else {
+      if (x[i] > hi) hi = x[i];
+      if (hi - x[i] >= kLift5Mm) {
+        rising = false;
+        lo = x[i];
+      }
+    }
+  }
+  return lifts;
+}
+
 bool hasGap(const uint16_t* t, size_t from, size_t to) {
   for (size_t i = from + 1; i <= to; i++) {
     if (since(t, i - 1, i) > kMaxGapMs) return true;
@@ -207,12 +231,22 @@ bool hasGap(const uint16_t* t, size_t from, size_t to) {
   return false;
 }
 
+// True if y rises above highThr somewhere in [from, to]: the rise between two different tops.
+bool peakBetween(const float* y, size_t from, size_t to, float highThr) {
+  for (size_t i = from; i <= to; i++) {
+    if (y[i] > highThr) return true;
+  }
+  return false;
+}
+
 // Tops the rep counter vouches for. A counted rep whose dip was shallower than 60 % of the deepest
 // (often a slower first rep) has no valley; it gets the lowest point of its dip, if that is a real
-// minimum inside [count - 300 ms, count + 600 ms] (the count fires early in the dip). Returns the
-// new valley count; the list stays sorted.
-size_t addCountedTops(const float* y, const SetData& d, size_t searchEnd, uint16_t* valleys, size_t count,
-                      size_t cap) {
+// minimum inside [count - 300 ms, count + 600 ms] (the count fires early in the dip) and a peak
+// separates it from the valleys on either side (findValleys' rule: otherwise it is a second dip of
+// a top that already has its valley, e.g. a slow lift held at the top before a fast lowering).
+// Returns the new valley count; the list stays sorted.
+size_t addCountedTops(const float* y, const SetData& d, size_t searchEnd, float highThr, uint16_t* valleys,
+                      size_t count, size_t cap) {
   for (size_t c = 0; c < d.countN && count < cap; c++) {
     const uint32_t ct = d.countMs[c];
     const uint32_t from = ct > kCountBeforeMs ? ct - kCountBeforeMs : 0;
@@ -230,11 +264,11 @@ size_t addCountedTops(const float* y, const SetData& d, size_t searchEnd, uint16
     }
     const bool interior = (best > lo || best == 0) && best < hi;  // not just the edge of a slope
     if (!interior || y[best] >= -kMinDipMg) continue;
-    size_t p = count;
-    while (p > 0 && valleys[p - 1] > best) {
-      valleys[p] = valleys[p - 1];
-      p--;
-    }
+    size_t p = count;  // insertion point
+    while (p > 0 && valleys[p - 1] > best) p--;
+    if (p > 0 && !peakBetween(y, valleys[p - 1], best, highThr)) continue;
+    if (p < count && !peakBetween(y, best, valleys[p], highThr)) continue;
+    for (size_t q = count; q > p; q--) valleys[q] = valleys[q - 1];
     valleys[p] = static_cast<uint16_t>(best);
     count++;
   }
@@ -357,7 +391,8 @@ bool analyzeMotion(const SetData& d, const WeightPipelineConfig& cfg, float* aUp
                                      out->valleys, kMaxRepSegments + 1);
     }
   }
-  out->valleyCount = addCountedTops(x, d, searchEnd, out->valleys, out->valleyCount, kMaxRepSegments + 1);
+  out->valleyCount =
+      addCountedTops(x, d, searchEnd, highThr, out->valleys, out->valleyCount, kMaxRepSegments + 1);
   if (out->valleyCount < 2) return fail(out, "fewer than two rep tops found");
 
   // 5. Integration windows. A valley-to-valley segment is one rep (the paper's segmentation), but
@@ -417,26 +452,20 @@ bool analyzeMotion(const SetData& d, const WeightPipelineConfig& cfg, float* aUp
     r.lift5 = static_cast<uint16_t>(lift5);
     r.lift5Frac = static_cast<uint8_t>(lroundf(fminf(fmaxf(frac, 0.0f), 1.0f) * 255.0f));
     r.heightMm = height > 0.0f ? static_cast<uint16_t>(lroundf(height)) : 0;
-    r.valid = lift5 != 0 && !hasGap(d.tMs, s, e);
+    // A window that holds more than one lift spans reps whose tops were too shallow to find (e.g.
+    // half reps the counter missed too); integrating across them collects too much drift. A rest
+    // at the bottom inside the window is fine: it is still one lift.
+    r.valid = lift5 != 0 && !hasGap(d.tMs, s, e) && countLifts(x, s, e) == 1;
     if (r.valid) heights[heightCount++] = r.heightMm;
   }
   out->segCount = segs;
 
   // Segments much lower than the typical lift are not reps (a pause, a bump, a partial top).
-  // Segments much longer than the typical rep hold several reps whose tops were too shallow to
-  // find (e.g. half reps): integrating that long collects too much drift.
   if (heightCount > 0) {
     const float minHeight = fmaxf(kMinHeightMm, kMinHeightFraction * median(heights, heightCount));
-    size_t n = 0;
     for (size_t k = 0; k < segs; k++) {
       RepSegment& r = out->seg[k];
       if (r.valid && r.heightMm < minHeight) r.valid = false;
-      if (r.valid) heights[n++] = r.durationMs;  // the array is free again: reuse it for durations
-    }
-    const float maxDuration = n >= 3 ? kMaxDurationFactor * median(heights, n) : 65535.0f;
-    for (size_t k = 0; k < segs; k++) {
-      RepSegment& r = out->seg[k];
-      if (r.valid && r.durationMs > maxDuration) r.valid = false;
       if (r.valid) out->validCount++;
     }
   }

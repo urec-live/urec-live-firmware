@@ -5,8 +5,8 @@ Automatic rep counting for selectorized gym machines, reproducing the beacon/gat
 ```
 LIS3DH ─INT1─► Feather nRF52840 ─BLE iBeacon─► ESP32-C3 gateway ─► Firebase RTDB
 (on the stack)  counts reps,        (minor = reps)  scans, tracks sets    + UREC Live machine status
-TMAG5273 ─I2C─► weighs each set
                 sleeps between
+TMAG5273 / LIS2MDL ─I2C─► same Feather: weighs each set (serial console)
 ```
 
 | Folder | What |

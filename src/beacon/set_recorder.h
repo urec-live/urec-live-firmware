@@ -12,7 +12,6 @@
 #include "beacon_config.h"
 #include "weight_pipeline.h"
 
-const uint8_t kMaxMagnetometers = 1;
 const size_t kRecorderSamples = static_cast<size_t>(BEACON_W8_MAX_SET_S) * 50;
 const size_t kRecorderMaxCounts = 100;
 

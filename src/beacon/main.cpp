@@ -426,15 +426,12 @@ TuningConsole g_console(g_settings, kConsoleHooks);
 // Teleplot (VS Code extension) plots lines of the form ">name:value". Prints the sample the 50 Hz
 // sampler just took (the same one the weight recorder stores), never reading the sensors itself.
 void streamSample() {
-  if (!Serial || Serial.availableForWrite() < 160) return;  // never block on a full USB buffer
-  const WeightSensing::Latest& s = g_weight.latest();
+  if (!Serial || Serial.availableForWrite() < 200) return;  // never block on a full USB buffer
   const uint8_t axis = g_cal.valid ? g_cal.axis : kAxisZ;
-  Serial.printf(">a:%d\n>cnt:%u\n>rearm:%u\n>int:%d\n>reps:%u\n", abs(s.accMg[axis]),
+  Serial.printf(">a:%d\n>cnt:%u\n>rearm:%u\n>int:%d\n>reps:%u\n", abs(g_weight.latestAccMg()[axis]),
                 g_countSpec.thresholdMg, g_rearmSpec.thresholdMg, digitalRead(BEACON_INT_PIN),
                 g_counter.reps());
-  if (s.bValid) {
-    Serial.printf(">bx:%.1f\n>by:%.1f\n>bz:%.1f\n", s.b[0] / 10.0f, s.b[1] / 10.0f, s.b[2] / 10.0f);
-  }
+  g_weight.printStreamFields();  // >tx >ty >tz (TMAG5273), >lx >ly >lz (LIS2MDL), in uT
 }
 
 }  // namespace
