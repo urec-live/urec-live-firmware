@@ -20,8 +20,8 @@ const uint8_t kClickCfg = 0x38;
 const uint8_t kAutoIncrement = 0x80;  // MSB of the sub-address enables multi-byte reads
 
 const uint8_t kStatusZyxda = 0x08;
-const uint16_t kThsLsbMg = 16;   // +/-2 g
-const int16_t kDataLsbMg = 16;   // low-power mode: 8-bit, 16 mg/digit at +/-2 g
+const uint16_t kThsLsbMg = 16;   // +/-2 g, in every power mode
+const int16_t kDataLsbMg = 4;    // normal mode: 10-bit, 4 mg/digit at +/-2 g
 }  // namespace
 
 bool Lis3dhMotion::begin(TwoWire& wire, uint8_t address) {
@@ -34,10 +34,10 @@ bool Lis3dhMotion::begin(TwoWire& wire, uint8_t address) {
 
 void Lis3dhMotion::configureBase() {
   write(kInt1Cfg, 0x00);  // no interrupt while reconfiguring
-  write(kCtrl1, 0x4F);    // ODR 50 Hz (0100), LPen=1, Z/Y/X enabled
+  write(kCtrl1, 0x47);    // ODR 50 Hz (0100), LPen=0 (normal 10-bit mode), Z/Y/X enabled
   write(kCtrl2, 0x00);    // HP filter bypassed: gravity stays in the signal (the "direction")
   write(kCtrl3, 0x40);    // I1_IA1 only (clears the data-ready routing Adafruit's begin() sets)
-  write(kCtrl4, 0x80);    // BDU=1, FS=+/-2 g, HR=0 (HR must be 0 in low-power mode)
+  write(kCtrl4, 0x80);    // BDU=1, FS=+/-2 g, HR=0 (normal mode, not high-resolution)
   write(kCtrl5, 0x08);    // LIR_INT1: INT1 stays high until INT1_SRC is read
   write(kCtrl6, 0x00);    // active-high, nothing on INT2
   write(kTempCfg, 0x00);  // ADC/temperature off
@@ -46,7 +46,7 @@ void Lis3dhMotion::configureBase() {
   write(kInt1Ths, 0x00);
   write(kInt1Dur, 0x00);
   (void)read(kInt1Src);   // drop any latched event left over from before an MCU reset
-  delay(2);               // low-power turn-on time is 1 ms
+  delay(25);              // turn-on: let the first normal-mode sample (20 ms at 50 Hz) arrive
 }
 
 void Lis3dhMotion::arm(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration) {
@@ -73,8 +73,9 @@ bool Lis3dhMotion::readSample(Sample* s, bool* fresh) {
   for (uint8_t i = 0; i < sizeof(buf); i++) buf[i] = static_cast<uint8_t>(wire_->read());
   if (fresh != nullptr) *fresh = (buf[0] & kStatusZyxda) != 0;
   for (uint8_t a = 0; a < 3; a++) {
-    // Low-power data is the signed high byte; the low byte only has to be read for BDU.
-    s->mg[a] = static_cast<int16_t>(static_cast<int8_t>(buf[2 + a * 2]) * kDataLsbMg);
+    // Normal-mode data is 10 bits, left-justified in the 16-bit L/H pair.
+    const int16_t raw = static_cast<int16_t>(buf[1 + a * 2] | (buf[2 + a * 2] << 8));
+    s->mg[a] = static_cast<int16_t>((raw >> 6) * kDataLsbMg);
   }
   return true;
 }

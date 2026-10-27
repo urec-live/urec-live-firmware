@@ -4,7 +4,7 @@ This guide explains the rep-counting system in this project, from the physics of
 
 > S. Bian, A. Rupp, M. Magno, *Fully Automatic Gym Exercises Recording: An IoT Solution*, IEEE MetroInd4.0&IoT 2023 ([arXiv 2305.17594](https://arxiv.org/abs/2305.17594))
 
-It uses the breadboard beacon from `../beacon-breadboard-schematic.md` and an ESP32-C3-DevKitM-1 as the gateway. Weight sensing is not part of this yet.
+It uses the breadboard beacon from `../beacon-breadboard-schematic.md` and an ESP32-C3-DevKitM-1 as the gateway. Weight sensing (a magnetometer on the same beacon) has its own guide: [weight-sensing.md](weight-sensing.md).
 
 ---
 
@@ -121,7 +121,7 @@ The beacon sits on the stack. Its Z axis is vertical, and at rest it reads 1000 
                            ► COUNT                                     ► RE-ARM, hold-off
 ```
 
-Per rep there is exactly one **dip** (slowing at the top plus starting down) and one **rise** (stopping at the bottom plus the next lift). These are small effects. For a smooth 30 cm stroke the peak is (A/2)(π/T)²: about 0.15 g for a 1 s lift, 0.07 g for 1.5 s and 0.04 g for 2 s. That is why the default thresholds are only **64 mg** (4 steps of 16 mg) from rest. By this estimate 64 mg catches lifts of up to about 1.5 s. Real turnarounds are usually sharper than a smooth sine, but for very slow tempos lower both deltas to 48 (`dl 48`, `dh 48`, §7). Below that, sensor noise (one 16 mg step) gets close.
+Per rep there is exactly one **dip** (slowing at the top plus starting down) and one **rise** (stopping at the bottom plus the next lift). These are small effects. For a smooth 30 cm stroke the peak is (A/2)(π/T)²: about 0.15 g for a 1 s lift, 0.07 g for 1.5 s and 0.04 g for 2 s. That is why the default thresholds are only **64 mg** (4 steps of 16 mg) from rest. By this estimate 64 mg catches lifts of up to about 1.5 s. Real turnarounds are usually sharper than a smooth sine, but for very slow tempos lower both deltas to 48 (`dl 48`, `dh 48`, §7). Below that, the interrupt threshold's 16 mg step gets close.
 
 ### 3.3 Why one threshold is not enough
 
@@ -183,10 +183,10 @@ While no set is active, the beacon re-measures **every 30 s and after every set*
 | Register | Value | Bits | Meaning |
 |---|---|---|---|
 | `INT1_CFG` 0x30 | `0x00` | | interrupt off while reconfiguring |
-| `CTRL_REG1` 0x20 | `0x4F` | ODR=0100, LPen=1, Z/Y/X on | 50 samples/s, low-power 8-bit mode (≈6 µA) |
+| `CTRL_REG1` 0x20 | `0x47` | ODR=0100, LPen=0, Z/Y/X on | 50 samples/s, normal 10-bit mode (≈11 µA). Weight sensing integrates the acceleration and needs the finer steps; for counting alone, low-power 8-bit mode (`0x4F`, ≈6 µA) would do |
 | `CTRL_REG2` 0x21 | `0x00` | HP filter bypassed | **keeps gravity in the signal**: that is the "direction" |
 | `CTRL_REG3` 0x22 | `0x40` | I1_IA1 | only interrupt-1 events drive the INT1 pin |
-| `CTRL_REG4` 0x23 | `0x80` | BDU=1, FS=±2 g, HR=0 | 16 mg per step; HR must be 0 in low-power mode |
+| `CTRL_REG4` 0x23 | `0x80` | BDU=1, FS=±2 g, HR=0 | 4 mg per data step in normal mode; the interrupt threshold still steps in 16 mg |
 | `CTRL_REG5` 0x24 | `0x08` | LIR_INT1 | **latched**: INT1 stays HIGH until `INT1_SRC` is read |
 | `CTRL_REG6` 0x25 | `0x00` | | INT1 active-high |
 | `TEMP_CFG` 0x1F | `0x00` | | ADC/temperature off |
@@ -202,7 +202,7 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 | `INT1_DURATION` 0x33 | samples | the condition must hold this many samples (20 ms each at 50 Hz) |
 | `INT1_CFG` 0x30 | one enable bit | XLIE `0x01`, XHIE `0x02`, YLIE `0x04`, YHIE `0x08`, ZLIE `0x10`, ZHIE `0x20` ("L" = below threshold, "H" = above). AOI=0 and 6D=0: a plain threshold. |
 
-**Reading data:** `readSample()` reads 7 bytes in one burst starting at `STATUS_REG` 0x27. The register address is sent as `0xA7`; the top bit means "auto-increment". In low-power mode each axis is the signed high byte × 16 mg. The low byte is read anyway, because with BDU=1 the outputs only update once both halves have been read. The burst never touches `REFERENCE` 0x26.
+**Reading data:** `readSample()` reads 7 bytes in one burst starting at `STATUS_REG` 0x27. The register address is sent as `0xA7`; the top bit means "auto-increment". In normal mode each axis is a 10-bit value, left-justified in its low/high byte pair: `(int16)(L | H << 8) >> 6`, times 4 mg. With BDU=1 the outputs only update once both halves have been read. The burst never touches `REFERENCE` 0x26.
 
 ---
 
@@ -216,6 +216,7 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 | `ibeacon_adv.*` | Bluefruit advertising bursts |
 | `tuning_console.*` | the USB serial commands (§7) |
 | `main.cpp` | boot sequence, sleep loop, interrupt handling, calibration |
+| `weight_sensing.*`, `set_recorder.*`, `tmag5273_mag.*`, `magnetometer.h`, `weight_settings.h` | weight sensing with a magnetometer ([weight-sensing.md](weight-sensing.md) §6) |
 
 ### 5.1 Boot order (`setup()`)
 
@@ -225,16 +226,18 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 4. **`Wire.begin()` at 400 kHz, then `Lis3dhMotion::begin()`:** checks `WHO_AM_I` = 0x33 and writes §4. Without a sensor the beacon logs an error, blinks and retries every 2 s.
 5. **Start the Bluefruit stack (SoftDevice S140)** as a non-connectable, non-scannable advertiser at +4 dBm, with the blue "connection" LED disabled.
 6. **Seed the set sequence number** from the SoftDevice's hardware random-number generator. A rebooted beacon then does not reuse the last set's number.
-7. **Wait 0.5 s** (hands off), **calibrate** (§3.6), **arm the count phase**.
+7. **Look for a magnetometer** for weight sensing and load its taught weights. This comes after Bluefruit, because the weights live in its flash file system ([weight-sensing.md](weight-sensing.md) §6.1).
+8. **Wait 0.5 s** (hands off), **calibrate** (§3.6), **arm the count phase**.
 
 ### 5.2 Sleeping
 
 `loop()` computes the earliest deadline. The candidates are:
 - the hold-off end
-- the repeat burst
+- the end of a radio burst, and the repeat burst
 - the set timeout
 - the 2 s housekeeping tick
-- with USB power present, also the 50 ms console tick, and the 20 ms stream tick while streaming
+- the 50 Hz sampler while a set is recorded for weight sensing (on battery too) or while streaming
+- with USB power present, also the 50 ms console tick
 
 It then calls `xSemaphoreTake(sem, time until that deadline)`. While the loop task waits, FreeRTOS has nothing to run. The Adafruit core's tickless idle then puts the chip into System ON sleep via `sd_app_evt_wait()`. The CPU wakes for exactly two reasons:
 - the **INT1 rising edge**: the tiny ISR `onInt1Rise()` only calls `xSemaphoreGiveFromISR`;
@@ -245,7 +248,7 @@ It then calls `xSemaphoreTake(sem, time until that deadline)`. While the loop ta
 1. **Read `INT1_SRC`.** This tells you which condition fired and also releases the latched INT1 pin. Nothing happens unless its IA bit is set and the axis/direction bit matches the phase that is armed.
 2. **Count phase:** call `RepCounter::onCountEvent(now)`. If it counts:
    - it builds the iBeacon frame;
-   - it **turns the red LED on, sends a burst, turns it off**;
+   - it **starts a burst with the red LED on**; `loop()` stops the burst, and the LED, 150 ms later;
    - it schedules the repeat burst 1.4 s later.
 3. **Re-arm phase:** call `RepCounter::onRearmEvent(now)`, which starts the hold-off.
 4. **`syncArm()`.**
@@ -285,8 +288,7 @@ So the full UUID is `6D1E3F2A-9B47-4C85-A0E2-7F31C558` + `0001`. `gym::encodeIBe
 1. Stop advertising if it is running.
 2. Set the data.
 3. Start with a 1 s safety timeout.
-4. Wait 150 ms, which covers 2 events at 100 ms intervals.
-5. Stop.
+4. Return at once. `loop()` stops the burst 150 ms later, which covers 2 events at 100 ms intervals. The burst must not block: a rep is counted at the top of the lift, exactly when the weight recorder needs its samples.
 
 The radio is completely off between bursts. Per rep that is 2 bursts × 2 events. Every packet carries the *total*, so a lost packet costs nothing unless it is the last one; the repeat burst covers that case.
 
@@ -295,6 +297,7 @@ The radio is completely off between bursts. Per rep that is 2 bursts × 2 events
 `RepCounter::poll()` ends the set 5 s after the last motion event:
 - reps go back to 0, as in the paper;
 - the monitor prints `[set] done: N reps`;
+- with a magnetometer fitted, the weight estimate follows ([weight-sensing.md](weight-sensing.md));
 - the drift check runs (§3.6).
 
 The beacon does not advertise "0". The gateway works out that the set ended from the silence (§8.3).
@@ -310,11 +313,11 @@ The paper measured **30 µA** asleep and **40 µA** on average while in use, on 
 | Feather's 3.3 V regulator (AP2112K) quiescent current | ~55 µA |
 | Battery-voltage divider on the Feather (VBAT → A6) | ~14 µA at 4.2 V |
 | GPIOTE input channel used by `attachInterrupt` | ~20 µA |
-| LIS3DH, 50 Hz low-power | ~6 µA |
+| LIS3DH, 50 Hz normal mode | ~11 µA |
 | nRF52840 System ON sleep + RTC | a few µA |
-| **Total while idle** | **~95 µA** |
+| **Total while idle** | **~100 µA** |
 
-On the 400 mAh LiPo that is **roughly 5–6 months** idle. Advertising adds very little, because the radio is on for ~150 ms twice per rep. Treat this as an estimate: measure it with a USB power meter or a multimeter in the battery lead before you rely on it.
+On the 400 mAh LiPo that is **roughly 5–6 months** idle. Not counted: the green power LED on each Adafruit breakout (about 0.1–0.2 mA each), which is more than all of the above. Remove it for battery use ([weight-sensing.md](weight-sensing.md) §3.3). Advertising adds very little, because the radio is on for ~150 ms twice per rep. Treat this as an estimate: measure it with a USB power meter or a multimeter in the battery lead before you rely on it.
 
 Things that cost power, and their switches:
 - **Red LED per rep:** `BEACON_LED_FEEDBACK 0`.
@@ -333,7 +336,7 @@ The defaults are starting points: every machine and lifter is different. The bea
 |---|---|
 | `h` | help |
 | `s` | status: mode, axis, resting reading, both thresholds, phase, reps, set seq, INT1 pin level |
-| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:` |
+| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:`, and with a magnetometer `>bx: >by: >bz:` (µT) |
 | `mode stack\|paper\|lever` | load that mode's preset, then recalibrate |
 | `dl <mg>` / `dh <mg>` | count / re-arm delta |
 | `durl <n>` / `durh <n>` | count / re-arm duration in samples (20 ms each) |
@@ -343,6 +346,7 @@ The defaults are starting points: every machine and lifter is different. The bea
 | `cal` | recalibrate (keep the beacon still) |
 | `reset` | end the current set now |
 | `cfg` | print the current settings as `#define` lines for `beacon_config.h` |
+| `mag`, `teach`, `weights`, `forget`, `dump`, `log` | weight sensing, see [weight-sensing.md](weight-sensing.md) §7 |
 
 ### Seeing the signal (Teleplot)
 
@@ -574,7 +578,7 @@ Use VS Code's PlatformIO sidebar (*Project Tasks → beacon / gateway → Upload
 | Upload | `pio run -e beacon -t upload` | `pio run -e gateway -t upload` |
 | Monitor | `pio device monitor -e beacon` | `pio device monitor -e gateway` |
 | If upload fails | double-click the Feather's reset button. The red LED pulses and a `FTHR840BOOT` drive appears; upload again | install the Silicon Labs **CP210x** driver; or hold **BOOT**, tap **RESET**, release BOOT |
-| Size today | 15.7 KB RAM, 135 KB flash | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
+| Size today | 94.6 KB RAM, 163 KB flash (79 KB of the RAM is weight sensing, [weight-sensing.md](weight-sensing.md) §6.4) | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
 
 With both boards plugged in, `pio device list` shows the ports. Un-comment `upload_port`/`monitor_port` in `platformio.ini` if auto-detect picks the wrong board. The environment names changed from `adafruit_feather_nrf52840` to `beacon`/`gateway`. Your old `.pio/…/adafruit_feather_nrf52840` folders can be deleted, and VS Code regenerates `launch.json` itself.
 
@@ -588,6 +592,7 @@ mode stack, axis auto -> z, rest 1008 mg (x 16, y -32, z 1008)
   rearm: |a| > 1072 mg for 2 samples (40 ms)
   hold-off 350 ms, min rep interval 600 ms, set timeout 5000 ms
 phase count, reps 0, set idle (seq 142), INT1 pin 0
+weight: TMAG5273 at 0x35, 0 weights taught (0 reps)
 [rep] 1  (set seq 143)
 [rep] 2  (set seq 143)
 ...
@@ -618,7 +623,7 @@ GetMeFit gateway gw-01 (boot 3fa2c1d0)
 
 ### Unit tests
 
-`test/test_gym_core/` holds 24 Unity tests for the packet format, the rep counter and the tracker. They cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, set amend after a late packet, bumps not recorded, and the full set ring.
+`test/test_gym_core/` holds 48 Unity tests for the packet format, the rep counter, the tracker and the weight sensing ([weight-sensing.md](weight-sensing.md) §11). The rep-counting tests cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, set amend after a late packet, bumps not recorded, and the full set ring.
 
 Run them on a plugged-in board:
 
@@ -668,17 +673,18 @@ The paper did 3 sets of 10 reps on leg curl, leg extension and lat pulldown. It 
 | `[urec] … HTTP -1` | Backend unreachable: wrong IP, firewall, or a different network. |
 | Monitor or Teleplot can't open the port | Only one program can hold a serial port; close the other. |
 | Upload to the Feather fails | Double-click reset (bootloader mode), then upload. |
+| `[weight] …` messages | See [weight-sensing.md](weight-sensing.md) §12. |
 
 ---
 
-## 14. Next: weight sensing hooks
+## 14. Weight sensing
 
-For the weight-sensing session, these are the parts that will matter:
+Weight sensing is implemented: a magnetometer on the LIS3DH's STEMMA QT chain, read while a set is active, reproducing W8-Scope. [weight-sensing.md](weight-sensing.md) explains it.
 
-- **When to read the magnetometer:** the beacon already knows when the stack is **still**, through the drift check after every set and during idle. Weight should be read exactly then; the schematic doc notes that the selector pin can't move mid-set. `checkDrift()` in `src/beacon/main.cpp` is the natural place to add the read.
-- **Where to send it:** the iBeacon frame is full. Major and minor are used, and a legacy advertisement has 31 bytes. The options are:
-  - put the weight in a second AD structure next to the iBeacon. There is 1 byte left, so this would mean dropping the flags or switching to a custom manufacturer format with the Nordic test company ID;
-  - use BLE 5 extended advertising, which both the nRF52840 and the ESP32-C3 support;
-  - make the beacon scannable and put the weight in the scan response; the gateway would then need an *active* scan.
-- **The gateway side:** add the weight to `BeaconPacket`, `MachineState` and `SetRecord`, then to the Firebase JSON. The backend's `WorkoutSet` already has `reps` and `weightLbs`.
-- **Libraries:** re-add `adafruit/Adafruit LIS2MDL` (and the TMAG5273 library) to `[env:beacon] lib_deps`. The comment in `platformio.ini` explains why they were taken out for now.
+What is still open is **sending the weight on**: the estimate is only printed on the beacon's console. The iBeacon frame is full. Major and minor are used, and a legacy advertisement has 31 bytes. The options are:
+- put the weight in a second AD structure next to the iBeacon. There is 1 byte left, so this would mean dropping the flags or switching to a custom manufacturer format with the Nordic test company ID;
+- use BLE 5 extended advertising, which both the nRF52840 and the ESP32-C3 support;
+- make the beacon scannable and put the weight in the scan response; the gateway would then need an *active* scan;
+- send a separate set-summary advertisement after each set.
+
+On the gateway side, the weight would go into `BeaconPacket`, `MachineState` and `SetRecord`, then into the Firebase JSON. The backend's `WorkoutSet` already has `reps` and `weightLbs`.

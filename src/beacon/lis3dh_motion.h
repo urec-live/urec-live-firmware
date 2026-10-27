@@ -20,7 +20,7 @@ class Lis3dhMotion {
   // Checks WHO_AM_I and writes the base configuration. Returns false if no LIS3DH answers.
   bool begin(TwoWire& wire, uint8_t address);
 
-  // 50 Hz, low-power (8-bit), +/-2 g, BDU, HP filter off, IA1 -> INT1 latched, IA1 disabled.
+  // 50 Hz, normal mode (10-bit, 4 mg), +/-2 g, BDU, HP filter off, IA1 -> INT1 latched, IA1 disabled.
   void configureBase();
 
   // Arms interrupt 1 for |a_axis| > thresholdMg (high) or < thresholdMg (!high), held for

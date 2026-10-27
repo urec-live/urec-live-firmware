@@ -197,16 +197,17 @@ The rep-counting firmware (`src/beacon/`, explained in `docs/rep-counting-walkth
 - The TMAG5273's INT also lands in F23. When the TMAG5273 sits in the slot instead of the LIS3DH, the same wire carries its interrupt.
 - On a moving weight stack, tape or hot-glue the jumper ends so vibration can't pull them out. The firmware sets a pull-down on D5, so a loose wire reads LOW instead of firing random reps.
 
-### Mounting on the gym machine (design decision, still open)
+### Mounting on the gym machine (decided: the stack's top plate)
 - **Never run the sensor cable from the moving weight stack to the fixed frame.** It would flex on every rep and could snag, and I2C isn't meant for long cables.
-- Weight only needs to be read **while the stack is at rest**, because the selector pin can't move mid-set. The accelerometer tells the Feather when the stack is at rest.
-- **Option A (preferred starting point): everything on the frame.** The beacon and magnetometer are fixed beside the stack with a short cable. At rest, the magnetometer reads the pin's position, which gives the weight. During a set it sees the pin rise and fall, so it can see reps too. Open question: can the LIS3DH feel enough frame vibration to wake the beacon? If not, the magnetometer can take over waking.
-- **Option B: everything on the stack's top plate.** The accelerometer gets a strong signal from every rep. The magnetometer reads only after the stack settles. Downsides: heavier settings put the pin farther from the sensor, and the impacts at the bottom of each rep can shake breadboard wires loose.
+- The weight is read **during each lift**, following W8-Scope (`docs/weight-sensing.md`). The field at the top of the lift depends on how many plates were lifted. The selector pin can't move mid-set, so there is one estimate per set.
+- **Option A (not used): everything on the frame.** The beacon and magnetometer would be fixed beside the stack with a short cable, and at rest the magnetometer would read the pin's position. Not used: a frame-mounted beacon cannot count reps (below), and W8-Scope reads the weight from the top plate.
+- **Option B (chosen): everything on the stack's top plate.** The accelerometer gets a strong signal from every rep, and the magnetometer rides with the lifted plates, as in W8-Scope. Downsides: the impacts at the bottom of each rep can shake breadboard wires loose, and heavier settings change the field less (the paper's "U-shape").
 - Planned test: zip-tie the finished breadboard beside the stack, do a few sets and log both sensors.
 - **Rep counting (decided 2026-10-24):** the accelerometer counts reps only on a part that moves with every rep. The paper put its beacon on "the part of the machine that undergoes the most movement". This build mounts the beacon **on the moving weight stack** (firmware mode `stack`), or on a lever arm (mode `lever`).
   - The beacon must be fixed rigidly. The paper's one failure was a beacon that shifted: "a slight displacement caused the beacon to lose the orientation used for interrupt generation".
   - A beacon on the frame (Option A) does not feel enough motion to count reps.
-  - How the magnetometer joins in is still open for the weight-sensing work.
+- **Weight sensing (decided 2026-10-26):** the magnetometer rides on the top plate with the beacon, plugged into the LIS3DH's STEMMA QT socket. The TMAG5273 comes first; the LIS2MDL can daisy-chain behind it so the two can be compared on the same sets. `docs/weight-sensing.md` explains the method.
+- **Power:** every Adafruit breakout has a green power LED (≈0.1–0.2 mA through 10 kΩ) and a regulator. That draws more than the whole beacon idles at (~100 µA). For battery use, remove the LED or its resistor on each board.
 
 ---
 

@@ -14,6 +14,9 @@ class TuningConsole {
     void (*settingsChanged)(bool needsRecalibration);
     void (*recalibrate)();
     void (*resetCount)();
+    // Commands this console does not know go here first (weight sensing); true = handled.
+    bool (*extraCommand)(const char* cmd, const char* arg);
+    void (*extraHelp)();
   };
 
   TuningConsole(MotionSettings& settings, const Hooks& hooks) : s_(settings), hooks_(hooks) {}

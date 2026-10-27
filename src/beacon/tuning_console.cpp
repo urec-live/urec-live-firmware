@@ -33,7 +33,7 @@ void TuningConsole::poll() {
 void TuningConsole::printHelp() {
   Serial.println(F("commands:"));
   Serial.println(F("  s                    status"));
-  Serial.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps)"));
+  Serial.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps, >bx >by >bz)"));
   Serial.println(F("  mode stack|paper|lever   load that mode's preset"));
   Serial.println(F("  dl <mg> / dh <mg>    count / re-arm delta"));
   Serial.println(F("  durl <n> / durh <n>  count / re-arm duration in samples (20 ms)"));
@@ -43,6 +43,7 @@ void TuningConsole::printHelp() {
   Serial.println(F("  cal                  recalibrate (keep the beacon still)"));
   Serial.println(F("  reset                end the current set"));
   Serial.println(F("  cfg                  print settings as #defines for beacon_config.h"));
+  if (hooks_.extraHelp != nullptr) hooks_.extraHelp();
 }
 
 void TuningConsole::execute(char* line) {
@@ -98,6 +99,8 @@ void TuningConsole::execute(char* line) {
     hooks_.resetCount();
   } else if (strcmp(cmd, "cfg") == 0) {
     hooks_.printConfig();
+  } else if (hooks_.extraCommand != nullptr && hooks_.extraCommand(cmd, arg)) {
+    // handled
   } else {
     Serial.println(F("? (h for help)"));
   }

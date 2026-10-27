@@ -8,6 +8,10 @@
 // The CPU sleeps in FreeRTOS tickless idle between events; it wakes on the LIS3DH INT1 edge,
 // on a timer deadline (hold-off, repeat burst, set timeout) or on the 2 s housekeeping tick.
 // docs/rep-counting-walkthrough.md explains every step.
+//
+// With a magnetometer on the STEMMA QT chain the beacon also weighs each set, reproducing
+// W8-Scope (Radhakrishnan, Misra & Balan, 2021): while a set is active it samples at 50 Hz, and
+// when the set ends it prints the weight. docs/weight-sensing.md explains it.
 #include <Arduino.h>
 #include <Wire.h>
 #include <bluefruit.h>
@@ -21,6 +25,7 @@
 #include "motion_settings.h"
 #include "rep_counter.h"
 #include "tuning_console.h"
+#include "weight_sensing.h"
 
 #define LOG(...)                                \
   do {                                          \
@@ -30,7 +35,7 @@
 namespace {
 
 const uint32_t kConsoleTickMs = 50;
-const uint32_t kStreamTickMs = 20;  // one LIS3DH sample at 50 Hz
+const uint32_t kDumpTickMs = 5;  // while a CSV dump drains to the USB host
 const uint8_t kCalSamples = 32;
 const uint8_t kDriftSamples = 8;
 
@@ -58,6 +63,7 @@ TickType_t ticksCeil(uint32_t ms) {
 SemaphoreHandle_t g_intSem = nullptr;
 Lis3dhMotion g_imu;
 IBeaconAdvertiser g_adv;
+WeightSensing g_weight;
 MotionSettings g_settings = settingsFromConfig();
 gym::RepCounter g_counter(counterConfig(g_settings));
 Calibration g_cal = {};
@@ -72,12 +78,13 @@ volatile bool g_serviceNow = false;  // INT1 was found high without an edge: han
 gym::BeaconFrame g_lastFrame = {};
 bool g_repeatPending = false;
 uint32_t g_repeatAtMs = 0;
+bool g_advActive = false;  // a burst is on the air until g_advStopAtMs
+uint32_t g_advStopAtMs = 0;
 uint16_t g_setReps = 0;  // reps of the set in progress (for the end-of-set log)
 
 uint32_t g_lastHousekeepingMs = 0;
 uint32_t g_lastCalAttemptMs = 0;
 uint32_t g_lastDriftCheckMs = 0;
-uint32_t g_lastStreamMs = 0;
 bool g_hostConnected = false;  // a serial monitor has the USB port open
 
 // ---------------------------------------------------------------- interrupt
@@ -149,13 +156,43 @@ void syncArm(bool force = false) {
 
 // ---------------------------------------------------------------- advertising
 
-void advertise(const gym::BeaconFrame& frame) {
+// Starts a burst and returns; loop() stops it at g_advStopAtMs. Not blocking matters: a rep is
+// counted at the top of the lift, exactly where the weight recorder needs its samples.
+void advertise(const gym::BeaconFrame& frame, uint32_t now) {
+  if (!g_adv.start(frame)) {
+    LOG("[err] advertising failed\n");
+    return;
+  }
   led(true);
-  if (!g_adv.burst(frame, BEACON_ADV_EVENTS_PER_BURST)) LOG("[err] advertising failed\n");
+  g_advActive = true;
+  g_advStopAtMs = now + g_adv.burstMs(BEACON_ADV_EVENTS_PER_BURST);
+}
+
+void endBurst() {
+  g_adv.stop();
   led(false);
+  g_advActive = false;
+}
+
+// ---------------------------------------------------------------- weight sensing
+
+// Weight sensing needs the beacon on the stack; on a lever arm the field says nothing about it.
+const char* weightBlocked() {
+  return g_settings.mode == MotionMode::Lever ? "lever mode (the beacon must sit on the weight stack)" : nullptr;
+}
+
+// Keeps the weight recorder in step with the rep counter: it records exactly while a set is
+// active. A set ended by the 5 s timeout is weighed in onSetEnded(); one ended any other way
+// (cal, reset, mode, axis, a drift recalibration) is aborted here.
+void syncRecorder(uint32_t now) {
+  const bool active = g_counter.setActive();
+  if (active && !g_weight.inSet()) g_weight.startSet(now, weightBlocked());
+  if (!active && g_weight.inSet()) g_weight.abortSet(now);
 }
 
 void onRepCounted(uint32_t now) {
+  syncRecorder(now);  // the first rep starts the set, and with it the recording
+  g_weight.onCount(now);
   g_setReps = g_counter.reps();
   g_lastFrame.equipmentType = BEACON_EQUIPMENT_TYPE;
   g_lastFrame.machineInstance = BEACON_MACHINE_INSTANCE;
@@ -163,7 +200,7 @@ void onRepCounted(uint32_t now) {
   g_lastFrame.reps = g_counter.reps();
   g_lastFrame.txPower = BEACON_RSSI_AT_1M;
   LOG("[rep] %u  (set seq %u)\n", g_lastFrame.reps, g_lastFrame.setSeq);
-  advertise(g_lastFrame);
+  advertise(g_lastFrame, now);
   // Paper: "double advertisements to decrease the loss rate"; a newer rep replaces this one.
   g_repeatPending = true;
   g_repeatAtMs = now + BEACON_ADV_REPEAT_DELAY_MS;
@@ -184,6 +221,7 @@ void deriveSpecs() {
 // bumped or tilted keeps counting after it recalibrates (the paper lost reps exactly that way).
 bool calibrate(uint32_t now) {
   g_counter.endSet();
+  syncRecorder(now);  // a set cut short by calibration is not weighed
   g_repeatPending = false;
   g_imu.disarm();
   g_hwArmed = false;
@@ -269,6 +307,8 @@ void serviceInterrupt(uint32_t now) {
 
 void onSetEnded(uint32_t now) {
   LOG("[set] done: %u reps\n", g_setReps);
+  g_weight.finishSet(now, g_counter.lastEventMs(), g_counter.setSeq(), g_setReps,
+                     static_cast<uint16_t>(g_settings.minRepIntervalMs));
   g_setReps = 0;
   g_repeatPending = false;
   checkDrift(now);
@@ -282,6 +322,7 @@ void housekeeping(uint32_t now) {
     return;
   }
   if (!g_counter.setActive() && now - g_lastDriftCheckMs >= BEACON_DRIFT_CHECK_MS) checkDrift(now);
+  if (!g_counter.setActive()) g_weight.housekeeping(now);
 }
 
 // ---------------------------------------------------------------- console
@@ -322,6 +363,7 @@ void printStatus() {
   Serial.printf("phase %s, reps %u, set %s (seq %u), INT1 pin %d\n", phaseName(g_counter.phase()),
                 g_counter.reps(), g_counter.setActive() ? "active" : "idle", g_counter.setSeq(),
                 digitalRead(BEACON_INT_PIN));
+  g_weight.printSummary();
 }
 
 void printConfig() {
@@ -358,6 +400,7 @@ void onRecalibrate() {
 
 void onResetCount() {
   g_counter.endSet();
+  syncRecorder(millis());
   g_repeatPending = false;
   g_setReps = 0;
   syncArm(true);
@@ -372,20 +415,26 @@ void printBanner() {
   printStatus();
 }
 
-const TuningConsole::Hooks kConsoleHooks = {printStatus, printConfig, onSettingsChanged, onRecalibrate,
-                                            onResetCount};
+bool onExtraCommand(const char* cmd, const char* arg) { return g_weight.command(cmd, arg); }
+
+void onExtraHelp() { g_weight.printHelp(); }
+
+const TuningConsole::Hooks kConsoleHooks = {printStatus,  printConfig,    onSettingsChanged, onRecalibrate,
+                                            onResetCount, onExtraCommand, onExtraHelp};
 TuningConsole g_console(g_settings, kConsoleHooks);
 
-// Teleplot (VS Code extension) plots lines of the form ">name:value".
+// Teleplot (VS Code extension) plots lines of the form ">name:value". Prints the sample the 50 Hz
+// sampler just took (the same one the weight recorder stores), never reading the sensors itself.
 void streamSample() {
-  if (!Serial || Serial.availableForWrite() < 96) return;  // never block on a full USB buffer
-  Lis3dhMotion::Sample s;
-  bool fresh = false;
-  if (!g_imu.readSample(&s, &fresh)) return;
+  if (!Serial || Serial.availableForWrite() < 160) return;  // never block on a full USB buffer
+  const WeightSensing::Latest& s = g_weight.latest();
   const uint8_t axis = g_cal.valid ? g_cal.axis : kAxisZ;
-  Serial.printf(">a:%d\n>cnt:%u\n>rearm:%u\n>int:%d\n>reps:%u\n", abs(s.mg[axis]),
+  Serial.printf(">a:%d\n>cnt:%u\n>rearm:%u\n>int:%d\n>reps:%u\n", abs(s.accMg[axis]),
                 g_countSpec.thresholdMg, g_rearmSpec.thresholdMg, digitalRead(BEACON_INT_PIN),
                 g_counter.reps());
+  if (s.bValid) {
+    Serial.printf(">bx:%.1f\n>by:%.1f\n>bz:%.1f\n", s.b[0] / 10.0f, s.b[1] / 10.0f, s.b[2] / 10.0f);
+  }
 }
 
 }  // namespace
@@ -416,8 +465,12 @@ void setup() {
     delay(2000);
   }
 
-  if (!g_adv.begin(BEACON_TX_POWER_DBM, BEACON_ADV_INTERVAL_MS)) LOG("[err] Bluefruit did not start\n");
+  const bool bleOk = g_adv.begin(BEACON_TX_POWER_DBM, BEACON_ADV_INTERVAL_MS);
+  if (!bleOk) LOG("[err] Bluefruit did not start\n");
   g_counter.seedSetSeq(randomByte());  // random, so a reboot does not repeat the last set number
+  // After Bluefruit: the taught weights live in its flash file system, and flash writes only
+  // complete while the SoftDevice runs.
+  g_weight.begin(Wire, g_imu, bleOk, millis());
 
   delay(500);  // let hands get off the board after a reset
   calibrate(millis());
@@ -440,9 +493,12 @@ void loop() {
   uint32_t deadline = 0;
   if (g_counter.nextDeadline(&deadline)) consider(deadline);
   if (g_repeatPending) consider(g_repeatAtMs);
+  if (g_advActive) consider(g_advStopAtMs);
+  // The weight recorder samples on battery too: its deadline is not gated on USB.
+  if (g_weight.sampling()) consider(g_weight.nextSampleMs());
   consider(g_lastHousekeepingMs + BEACON_HOUSEKEEPING_MS);
   if (usb && wait > kConsoleTickMs) wait = kConsoleTickMs;
-  if (usb && g_console.streaming()) consider(g_lastStreamMs + kStreamTickMs);
+  if (usb && g_weight.dumping() && wait > kDumpTickMs) wait = kDumpTickMs;
   if (g_serviceNow) wait = 0;
 
   const bool edge = xSemaphoreTake(g_intSem, ticksCeil(wait)) == pdTRUE;
@@ -454,12 +510,16 @@ void loop() {
   }
 
   if (g_counter.poll(now)) onSetEnded(now);
+  syncRecorder(now);
   syncArm();
 
+  if (g_advActive && due(now, g_advStopAtMs)) endBurst();
   if (g_repeatPending && due(now, g_repeatAtMs)) {
     g_repeatPending = false;
-    advertise(g_lastFrame);
+    advertise(g_lastFrame, now);
   }
+
+  if (g_weight.tick(now) && usb && g_console.streaming()) streamSample();
 
   if (elapsed(now, g_lastHousekeepingMs, BEACON_HOUSEKEEPING_MS)) {
     g_lastHousekeepingMs = now;
@@ -471,12 +531,9 @@ void loop() {
     if (host && !g_hostConnected) printBanner();
     g_hostConnected = host;
     g_console.poll();
-    if (g_console.streaming() && elapsed(now, g_lastStreamMs, kStreamTickMs)) {
-      // Keep a steady 50 Hz: step the schedule by one sample, or resync after a long gap.
-      g_lastStreamMs = (now - g_lastStreamMs < 2 * kStreamTickMs) ? g_lastStreamMs + kStreamTickMs : now;
-      streamSample();
-    }
+    g_weight.pumpDump();
   } else {
     g_hostConnected = false;
   }
+  g_weight.setStreaming(usb && g_console.streaming(), now);
 }

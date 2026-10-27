@@ -5,6 +5,7 @@
 
 #include "gym_protocol.h"
 #include "motion_settings.h"
+#include "weight_settings.h"
 
 // ---- Identity ---------------------------------------------------------------------------------
 // Paper: "the UUID chunk is pre-programmed to represent the gym equipment type".
@@ -41,6 +42,17 @@
                                     // half the smallest delta, or a drift eats the count margin)
 #define BEACON_DRIFT_CHECK_MS 30000 // how often to check for drift while idle
 #define BEACON_CAL_RETRY_MS 10000   // retry interval while calibration keeps failing
+
+// ---- Weight sensing (docs/weight-sensing.md) ---------------------------------------------------
+// W8-Scope: a magnetometer on the stack's top plate sees how many steel slabs were lifted. It plugs
+// into the LIS3DH's spare STEMMA QT socket (schematic §8). Without one, nothing below runs.
+#define BEACON_MAG_SENSOR MagSensor::Auto
+#define BEACON_TMAG5273_ADDR 0x35
+#define BEACON_TMAG_OVERSAMPLE 4   // 32x conversions averaged per 50 Hz sample (1..5; 4 = 13.4 ms)
+#define BEACON_W8_MAX_SET_S 60     // recording buffer; a longer set keeps its last 60 s
+#define BEACON_W8_MIN_REP_MS 2000  // paper's dT between rep tops (shortened for faster counted reps)
+// Taught weights are plain numbers with one decimal (`teach 12.5`). Use the machine's unit: lb
+// matches the backend's weightLbs.
 
 // ---- Advertising ------------------------------------------------------------------------------
 #define BEACON_TX_POWER_DBM 4        // nRF52840: -40,-20,-16,-12,-8,-4,0,2..8
