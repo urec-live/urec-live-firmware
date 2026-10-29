@@ -48,15 +48,19 @@ A weight stack is a pile of steel plates. Steel bends the Earth's magnetic field
 
 The beacon sits on the **top plate**. When the lifter pulls with the pin in plate *K*, plates 1..*K* rise together with the sensor and the remaining plates stay down. The paper models the field at the top of the lift as
 
-```
-          K    w_i          M      w_i
-    B  =  Σ  -------   +    Σ  -----------        (paper eq. 1)
-         i=1   d_i²        i=K   (D + d_i)²
-```
+$$
+B \;=\; \underbrace{\sum_{i=1}^{K} \frac{w_i}{d_i^{2}}}_{\text{plates lifted with the sensor}}
+\;+\; \underbrace{\sum_{i=K}^{M} \frac{w_i}{\left(D + d_i\right)^{2}}}_{\text{plates left behind}}
+\qquad \text{(paper eq. 1)}
+$$
 
-where *d_i* is a plate's distance from the sensor and *D* the lift height. The first term (plates that moved with the sensor) is unchanged. The second term (plates left behind) gets weaker the higher the stack goes. So **the field at the top of the lift depends on how many plates were lifted**.
+where $M$ is the number of plates, $w_i$ the mass of plate $i$, $d_i$ its distance from the sensor at rest, $D$ the lift height and $K$ the number of plates lifted. (The paper starts the second sum at $i = K$. The plates left behind are $i > K$, which is what the text means by "$M - K$ plates", so read it as $i = K+1$.) The first term is unchanged by the lift, because those plates move with the sensor. The second term gets weaker the higher the stack goes. So **the field at the top of the lift depends on how many plates were lifted**.
 
-At rest all plates are in their usual place whatever the pin setting, so the field at rest is (almost) the same for every weight. The difference between the two is what the beacon measures.
+At rest ($D = 0$) all plates are in their usual place whatever the pin setting, so the field at rest is (almost) the same for every weight. The beacon measures the difference between the two:
+
+$$
+\Delta B \;=\; B_{\text{top}} - B_{\text{rest}}
+$$
 
 ### 2.2 Light weights are easy, heavy weights are hard
 
@@ -109,7 +113,7 @@ Recording starts with the first counted rep and stops when the rep counter ends 
    - The set only ends 5 s after the last motion event, so the end of the recording shows the stack at rest.
    - The beacon looks for the first 1.5 s after the last event (+0.5 s) in which every accelerometer axis stays within `BEACON_STILL_P2P_MG`. That is early in the rest, before anyone pulls the pin for the next set.
    - The mean of that window is the gravity vector. The median of the field there is the **field at rest**, and it must not drift between the window's two halves.
-2. **Vertical acceleration.** a_up = a · ĝ − |g|. The direction comes from gravity, so a board that is upside down or tilted (by up to the 45° the rep counter allows) works.
+2. **Vertical acceleration.** $a_{\text{up}} = \mathbf{a}\cdot\hat{\mathbf{g}} - \lVert\mathbf{g}\rVert$, where $\mathbf{g}$ is the gravity vector measured at rest and $\hat{\mathbf{g}} = \mathbf{g}/\lVert\mathbf{g}\rVert$. The direction comes from gravity, so a board that is upside down or tilted (by up to the 45° the rep counter allows) works.
 3. **Low-pass.** A zero-phase filter at 3 Hz for finding the reps, and a lighter one at 8 Hz for integrating. Each pass starts on a mirror image of the samples at its end, as `filtfilt` does, because the recording begins in the middle of the first rep's dip.
 4. **Reps** (paper: valleys).
    - Valleys are local minima below 60 % of the lowest value, at least ΔT = 2 s apart.
