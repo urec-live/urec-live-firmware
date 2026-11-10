@@ -7,3 +7,6 @@ src/gateway/secrets.h
 # Reference papers stay local (copyrighted); docs link to arXiv instead
 *.pdf
 *.code-workspace
+# Gym/bench session logs from tools/gym_capture.py and idle_soak.py (the gateway banner prints its URLs)
+sessions/
+__pycache__/
