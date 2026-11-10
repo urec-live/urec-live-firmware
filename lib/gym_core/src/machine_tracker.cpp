@@ -14,6 +14,7 @@ MachineTracker::MachineTracker(size_t machineCount, const TrackerConfig& cfg)
   for (size_t i = 0; i < kMaxMachines; i++) {
     liveDirty_[i] = false;
     useChanged_[i] = false;
+    batteryDirty_[i] = false;
   }
 }
 
@@ -55,6 +56,24 @@ void MachineTracker::onPacket(size_t machine, uint8_t setSeq, uint16_t reps, int
     st.inUse = true;
     useChanged_[machine] = true;
     liveDirty_[machine] = true;
+  }
+}
+
+void MachineTracker::onStatus(size_t machine, uint16_t batteryMv, bool onUsb, uint32_t nowMs) {
+  if (machine >= count_) return;
+  MachineState& st = states_[machine];
+  // Leaves lastPacketMs alone: a status frame says nothing about sets or use.
+  const uint16_t moved = static_cast<uint16_t>(batteryMv > st.batteryReportedMv ? batteryMv - st.batteryReportedMv
+                                                                                : st.batteryReportedMv - batteryMv);
+  const bool report = !st.batteryKnown || onUsb != st.batteryOnUsb || moved >= cfg_.batteryStepMv ||
+                      elapsed(nowMs, st.batteryReportedMs, cfg_.batteryRefreshMs);
+  st.batteryKnown = true;
+  st.batteryMv = batteryMv;
+  st.batteryOnUsb = onUsb;
+  if (report) {
+    st.batteryReportedMv = batteryMv;
+    st.batteryReportedMs = nowMs;
+    batteryDirty_[machine] = true;
   }
 }
 
@@ -115,6 +134,13 @@ bool MachineTracker::takeUseChanged(size_t machine) {
   if (machine >= count_) return false;
   const bool d = useChanged_[machine];
   useChanged_[machine] = false;
+  return d;
+}
+
+bool MachineTracker::takeBatteryDirty(size_t machine) {
+  if (machine >= count_) return false;
+  const bool d = batteryDirty_[machine];
+  batteryDirty_[machine] = false;
   return d;
 }
 

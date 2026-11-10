@@ -38,6 +38,10 @@ static const size_t kMachineCount = sizeof(kMachines) / sizeof(kMachines[0]);
 #define GATEWAY_MACHINE_IDLE_MS 300000 // no packet for 5 min: machine is free again
 #define GATEWAY_MIN_REPS_FOR_USE 2     // 1-rep "sets" are bumps (e.g. moving the selector pin)
 
+// ---- Beacon battery (status frames, every 5 min from each beacon) -----------------------------
+#define GATEWAY_BATTERY_STEP_MV 20           // upload a reading that moved this much...
+#define GATEWAY_BATTERY_REFRESH_MS 1800000   // ...or is 30 min old, so battery/updatedAt shows it is current
+
 // ---- BLE scanning -----------------------------------------------------------------------------
 #define GATEWAY_SCAN_INTERVAL_MS 100  // interval == window: scan continuously (Espressif coex advice)
 #define GATEWAY_SCAN_WINDOW_MS 100

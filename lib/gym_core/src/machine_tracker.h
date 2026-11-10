@@ -10,6 +10,11 @@
 //   - a later packet with the same set sequence reopens and amends that set (re-emitted with the
 //     same setNumber, so an idempotent upload just overwrites it).
 // In use: true once a set reaches minRepsForUse reps, false after idleMs without packets.
+//
+// Battery: status frames (onStatus) only update the battery fields. They never count as a
+// packet for the set gap or the idle time, which go by rep packets alone. A reading is reported
+// (takeBatteryDirty) the first time, when USB power comes or goes, when it moves batteryStepMv
+// from the last report, and at least every batteryRefreshMs so the upload shows it is current.
 #pragma once
 
 #include <stddef.h>
@@ -21,6 +26,8 @@ struct TrackerConfig {
   uint32_t setGapMs;       // no packet for this long finalizes the open set
   uint32_t idleMs;         // no packet for this long -> machine is no longer in use
   uint16_t minRepsForUse;  // sets below this are treated as bumps: no "in use", no record
+  uint16_t batteryStepMv;     // battery: report a change this big...
+  uint32_t batteryRefreshMs;  // ...and an unchanged reading at least this often
 };
 
 struct MachineState {
@@ -35,6 +42,12 @@ struct MachineState {
   int8_t rssi = 0;
   uint32_t lastPacketMs = 0;
   uint32_t setStartMs = 0;
+
+  bool batteryKnown = false;  // a status frame has arrived since boot
+  uint16_t batteryMv = 0;     // latest reading
+  bool batteryOnUsb = false;  // the beacon was on USB power: batteryMv is the charger's
+  uint16_t batteryReportedMv = 0;
+  uint32_t batteryReportedMs = 0;
 
   // Live rep count to display: 0 between sets (the paper's dashboard falls back to 0).
   uint16_t liveReps() const { return setOpen ? setReps : 0; }
@@ -60,6 +73,7 @@ class MachineTracker {
   const TrackerConfig& config() const { return cfg_; }
 
   void onPacket(size_t machine, uint8_t setSeq, uint16_t reps, int8_t rssi, uint32_t nowMs);
+  void onStatus(size_t machine, uint16_t batteryMv, bool onUsb, uint32_t nowMs);
   void tick(uint32_t nowMs);
 
   const MachineState& state(size_t machine) const { return states_[machine]; }
@@ -67,6 +81,7 @@ class MachineTracker {
   // Each returns whether the flag was set, and clears it.
   bool takeLiveDirty(size_t machine);   // live fields changed (reps/set/inUse/lastSetReps)
   bool takeUseChanged(size_t machine);  // inUse flipped
+  bool takeBatteryDirty(size_t machine);  // a battery reading is due to be reported
 
   // Oldest finalized set record first. Returns false when empty.
   bool popSet(SetRecord* out);
@@ -81,6 +96,7 @@ class MachineTracker {
   MachineState states_[kMaxMachines];
   bool liveDirty_[kMaxMachines];
   bool useChanged_[kMaxMachines];
+  bool batteryDirty_[kMaxMachines];
   SetRecord ring_[kRingSize];
   size_t ringHead_ = 0;  // index of the oldest record
   size_t ringLen_ = 0;

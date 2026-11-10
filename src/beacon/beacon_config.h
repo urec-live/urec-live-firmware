@@ -61,6 +61,18 @@
 #define BEACON_ADV_INTERVAL_MS 100
 #define BEACON_ADV_EVENTS_PER_BURST 2
 #define BEACON_ADV_REPEAT_DELAY_MS 1400  // second burst per rep (paper: "double advertisements")
+// Status frame (battery voltage) at boot and then this often, held back while a set is active.
+// One burst costs ~0.2 uA averaged at 5 min. The gateway hears it without any change to its scan.
+#define BEACON_STATUS_INTERVAL_MS 300000
+
+// ---- Bluetooth console (ble_console.h) ---------------------------------------------------------
+// The tuning console on a phone, over the Nordic UART Service: Adafruit's Bluefruit Connect app
+// (UART), nRF Connect or Serial Bluetooth Terminal. The beacon shows up as "GetMeFit Leg Curl #1".
+// Anyone in range can connect while it advertises, so it only does so for a window.
+#define BEACON_BLE_CONSOLE 1                    // 0 = USB console only
+#define BEACON_BLE_CONSOLE_WINDOW_S 600         // connectable this long after power-up and after a
+                                                // phone disconnects; 0 = whenever no phone is connected
+#define BEACON_BLE_CONSOLE_ADV_INTERVAL_MS 500  // connectable advertising: some tens of uA while open
 
 // ---- Misc -------------------------------------------------------------------------------------
 #define BEACON_LED_FEEDBACK 1        // red LED on during each burst; set 0 to save power

@@ -12,6 +12,18 @@
 //   [21]     instance     major low byte: which machine of that type (1, 2, ...)
 //   [22..23] reps         minor, big-endian           -> "minor = repetition count" (paper)
 //   [24]     txPower      calibrated RSSI at 1 m (signed dBm)
+//
+// With the flags AD that is 30 of the 31 bytes of a legacy advertisement, so anything else goes
+// in a separate status advertisement (its own manufacturer data, not an iBeacon, so phones and
+// iBeacon scanners never mistake it for a rep count):
+//
+//   [0..1]   FF FF        company ID 0xFFFF: the Bluetooth SIG's ID for tests and prototypes
+//   [2..5]   6D 1E 3F 2A  first 4 bytes of kUuidBase: "this is GetMeFit"
+//   [6]      01           frame kind: status
+//   [7..8]   type         equipment type, big-endian
+//   [9]      instance     machine instance
+//   [10..11] batteryMv    battery voltage in mV, big-endian
+//   [12]     flags        bit 0: USB power present (batteryMv is then the charger's, not the battery's)
 #pragma once
 
 #include <stddef.h>
@@ -75,5 +87,32 @@ bool decodeIBeacon(const uint8_t* data, size_t len, BeaconFrame* out);
 // Walks the AD structures of a raw advertising payload ([len][type][data...]...) and decodes
 // the first GetMeFit iBeacon found. Returns false if there is none or the payload is malformed.
 bool findIBeaconInPayload(const uint8_t* payload, size_t len, BeaconFrame* out);
+
+// ---- Status frame -------------------------------------------------------------------------------
+
+const uint16_t kStatusCompanyId = 0xFFFF;
+const uint8_t kStatusKind = 0x01;  // frame kinds: append new ones, never renumber
+const size_t kStatusDataLen = 13;
+const uint8_t kStatusUsbPower = 0x01;  // flags bit 0
+
+struct StatusFrame {
+  uint16_t equipmentType;
+  uint8_t machineInstance;
+  uint16_t batteryMv;
+  uint8_t flags;  // kStatus* bits
+};
+
+// Writes the 13-byte manufacturer data for `frame` into `out`.
+void encodeStatus(const StatusFrame& frame, uint8_t out[kStatusDataLen]);
+
+// Decodes 13 bytes of manufacturer data. Returns false unless it is a GetMeFit status frame.
+bool decodeStatus(const uint8_t* data, size_t len, StatusFrame* out);
+
+// Like findIBeaconInPayload(), for the first GetMeFit status frame.
+bool findStatusInPayload(const uint8_t* payload, size_t len, StatusFrame* out);
+
+// Charge left in a single-cell LiPo at the beacon's tiny load (~0.1 mA), 0..100 %, from a
+// typical resting-voltage curve. A rough guide: accurate to maybe 10 %, worse when cold.
+uint8_t batteryPercent(uint16_t mv);
 
 }  // namespace gym

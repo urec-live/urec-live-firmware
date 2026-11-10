@@ -12,13 +12,19 @@
 // With a magnetometer on the STEMMA QT chain the beacon also weighs each set, reproducing
 // W8-Scope (Radhakrishnan, Misra & Balan, 2021): while a set is active it samples at 50 Hz, and
 // when the set ends it prints the weight. docs/weight-sensing.md explains it.
+//
+// The console (commands and everything printed) works on USB and on a phone over Bluetooth
+// (ble_console.h). While either is connected, the loop also wakes every 50 ms to read commands.
 #include <Arduino.h>
 #include <Wire.h>
 #include <bluefruit.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "battery.h"
 #include "beacon_config.h"
+#include "ble_console.h"
+#include "console_out.h"
 #include "gym_protocol.h"
 #include "ibeacon_adv.h"
 #include "lis3dh_motion.h"
@@ -27,9 +33,10 @@
 #include "tuning_console.h"
 #include "weight_sensing.h"
 
+// Console text for whoever listens: the USB monitor and/or a phone (console_out.h).
 #define LOG(...)                                \
   do {                                          \
-    if (Serial) Serial.printf(__VA_ARGS__);     \
+    if (Console) Console.printf(__VA_ARGS__);   \
   } while (0)
 
 namespace {
@@ -81,11 +88,14 @@ uint32_t g_repeatAtMs = 0;
 bool g_advActive = false;  // a burst is on the air until g_advStopAtMs
 uint32_t g_advStopAtMs = 0;
 uint16_t g_setReps = 0;  // reps of the set in progress (for the end-of-set log)
+bool g_statusSent = false;  // the boot status frame has gone out
+uint32_t g_lastStatusMs = 0;
 
 uint32_t g_lastHousekeepingMs = 0;
 uint32_t g_lastCalAttemptMs = 0;
 uint32_t g_lastDriftCheckMs = 0;
 bool g_hostConnected = false;  // a serial monitor has the USB port open
+bool g_consoleAdvFailed = false;  // logged once, not on every retry
 
 // ---------------------------------------------------------------- interrupt
 
@@ -172,6 +182,53 @@ void endBurst() {
   g_adv.stop();
   led(false);
   g_advActive = false;
+}
+
+// The Bluetooth console's connectable advertisement fills the gaps between bursts while no phone
+// is connected and its window is open (ble_console.h). A burst replaces it; this restarts it.
+void syncConsoleAdvertising(uint32_t now) {
+  const bool want = ble_console::wantsAdvertising(now) && !g_advActive;
+  if (want && !g_adv.consoleOn()) {
+    const bool ok = g_adv.startConsole(ble_console::service(), BEACON_BLE_CONSOLE_ADV_INTERVAL_MS);
+    if (!ok && !g_consoleAdvFailed) LOG("[err] advertising failed (Bluetooth console)\n");
+    g_consoleAdvFailed = !ok;
+  } else if (!want && g_adv.consoleOn()) {
+    g_adv.stop();
+  }
+}
+
+void printBattery(uint16_t mv, bool usb) {
+  if (usb) {
+    Console.printf("%u.%02u V (USB power: the charger's voltage, not the battery's)", mv / 1000, (mv % 1000) / 10);
+  } else {
+    Console.printf("%u.%02u V (%u %%)", mv / 1000, (mv % 1000) / 10, gym::batteryPercent(mv));
+  }
+}
+
+// Battery report for the gateway: a status frame at boot, then every BEACON_STATUS_INTERVAL_MS.
+// Held back while a set is active or a rep burst is on the air or pending, so it never replaces
+// a rep count. No LED: that stays feedback for reps. A rep counted meanwhile replaces it.
+void maybeSendStatus(uint32_t now) {
+  if (g_statusSent && !elapsed(now, g_lastStatusMs, BEACON_STATUS_INTERVAL_MS)) return;
+  if (g_counter.setActive() || g_advActive || g_repeatPending) return;
+  g_statusSent = true;
+  g_lastStatusMs = now;  // a failed burst waits for the next interval too, so it cannot spam
+  gym::StatusFrame frame;
+  frame.equipmentType = BEACON_EQUIPMENT_TYPE;
+  frame.machineInstance = BEACON_MACHINE_INSTANCE;
+  frame.batteryMv = readBatteryMv();  // before the burst: the radio's current would dip it
+  frame.flags = usbPowered() ? gym::kStatusUsbPower : 0;
+  if (!g_adv.start(frame)) {
+    LOG("[err] advertising failed (status)\n");
+    return;
+  }
+  g_advActive = true;
+  g_advStopAtMs = now + g_adv.burstMs(BEACON_ADV_EVENTS_PER_BURST);
+  if (Console) {
+    Console.print(F("[battery] "));
+    printBattery(frame.batteryMv, (frame.flags & gym::kStatusUsbPower) != 0);
+    Console.println(F(", sent to the gateway"));
+  }
 }
 
 // ---------------------------------------------------------------- weight sensing
@@ -338,44 +395,47 @@ const char* phaseName(gym::RepPhase p) {
 
 void printSpec(const char* label, const PhaseSpec& p) {
   if (!p.valid) {
-    Serial.printf("  %s: (not armed)\n", label);
+    Console.printf("  %s: (not armed)\n", label);
     return;
   }
-  Serial.printf("  %s: |a| %c %u mg for %u samples (%u ms)\n", label, p.high ? '>' : '<',
+  Console.printf("  %s: |a| %c %u mg for %u samples (%u ms)\n", label, p.high ? '>' : '<',
                 p.thresholdMg, p.duration, p.duration * 20u);
 }
 
 void printStatus() {
-  Serial.printf("%s #%u, tx %+d dBm\n", gym::equipmentName(BEACON_EQUIPMENT_TYPE),
+  Console.printf("%s #%u, tx %+d dBm\n", gym::equipmentName(BEACON_EQUIPMENT_TYPE),
                 BEACON_MACHINE_INSTANCE, BEACON_TX_POWER_DBM);
-  Serial.printf("mode %s, axis %s", modeName(g_settings.mode), axisName(g_settings.axis));
+  Console.printf("mode %s, axis %s", modeName(g_settings.mode), axisName(g_settings.axis));
   if (g_cal.valid) {
-    Serial.printf(" -> %s, rest %u mg (x %d, y %d, z %d)\n", axisName(g_cal.axis), g_cal.restMg,
+    Console.printf(" -> %s, rest %u mg (x %d, y %d, z %d)\n", axisName(g_cal.axis), g_cal.restMg,
                   g_cal.meanMg[0], g_cal.meanMg[1], g_cal.meanMg[2]);
   } else {
-    Serial.println(F(", NOT CALIBRATED"));
+    Console.println(F(", NOT CALIBRATED"));
   }
   printSpec("count", g_countSpec);
   printSpec("rearm", g_rearmSpec);
-  Serial.printf("  hold-off %lu ms, min rep interval %lu ms, set timeout %u ms\n",
+  Console.printf("  hold-off %lu ms, min rep interval %lu ms, set timeout %u ms\n",
                 static_cast<unsigned long>(g_settings.holdoffMs),
                 static_cast<unsigned long>(g_settings.minRepIntervalMs), BEACON_SET_TIMEOUT_MS);
-  Serial.printf("phase %s, reps %u, set %s (seq %u), INT1 pin %d\n", phaseName(g_counter.phase()),
+  Console.printf("phase %s, reps %u, set %s (seq %u), INT1 pin %d\n", phaseName(g_counter.phase()),
                 g_counter.reps(), g_counter.setActive() ? "active" : "idle", g_counter.setSeq(),
                 digitalRead(BEACON_INT_PIN));
+  Console.print(F("battery "));
+  printBattery(readBatteryMv(), usbPowered());
+  Console.printf(", reported every %lu s\n", static_cast<unsigned long>(BEACON_STATUS_INTERVAL_MS / 1000));
   g_weight.printSummary();
 }
 
 void printConfig() {
   static const char* const kAxisDefines[] = {"kAxisX", "kAxisY", "kAxisZ", "kAxisAuto"};
-  Serial.printf("#define BEACON_MOTION_MODE %s\n", modeConfigName(g_settings.mode));
-  Serial.printf("#define BEACON_AXIS %s\n", kAxisDefines[g_settings.axis <= kAxisAuto ? g_settings.axis : kAxisAuto]);
-  Serial.printf("#define BEACON_COUNT_DELTA_MG %u\n", g_settings.countDeltaMg);
-  Serial.printf("#define BEACON_REARM_DELTA_MG %u\n", g_settings.rearmDeltaMg);
-  Serial.printf("#define BEACON_COUNT_DURATION %u\n", g_settings.countDuration);
-  Serial.printf("#define BEACON_REARM_DURATION %u\n", g_settings.rearmDuration);
-  Serial.printf("#define BEACON_HOLDOFF_MS %lu\n", static_cast<unsigned long>(g_settings.holdoffMs));
-  Serial.printf("#define BEACON_MIN_REP_INTERVAL_MS %lu\n",
+  Console.printf("#define BEACON_MOTION_MODE %s\n", modeConfigName(g_settings.mode));
+  Console.printf("#define BEACON_AXIS %s\n", kAxisDefines[g_settings.axis <= kAxisAuto ? g_settings.axis : kAxisAuto]);
+  Console.printf("#define BEACON_COUNT_DELTA_MG %u\n", g_settings.countDeltaMg);
+  Console.printf("#define BEACON_REARM_DELTA_MG %u\n", g_settings.rearmDeltaMg);
+  Console.printf("#define BEACON_COUNT_DURATION %u\n", g_settings.countDuration);
+  Console.printf("#define BEACON_REARM_DURATION %u\n", g_settings.rearmDuration);
+  Console.printf("#define BEACON_HOLDOFF_MS %lu\n", static_cast<unsigned long>(g_settings.holdoffMs));
+  Console.printf("#define BEACON_MIN_REP_INTERVAL_MS %lu\n",
                 static_cast<unsigned long>(g_settings.minRepIntervalMs));
 }
 
@@ -404,13 +464,13 @@ void onResetCount() {
   g_repeatPending = false;
   g_setReps = 0;
   syncArm(true);
-  Serial.println(F("set ended"));
+  Console.println(F("set ended"));
 }
 
-// Boot messages are lost when no monitor is open (LOG only prints to a connected host), so the
-// banner and status are repeated whenever a monitor connects.
+// Boot messages are lost when nobody listens (LOG only prints to a connected monitor or phone), so
+// the banner and status are repeated to each monitor and phone that connects.
 void printBanner() {
-  Serial.printf("GetMeFit beacon ready: %s #%u. Type h for commands.\n",
+  Console.printf("GetMeFit beacon ready: %s #%u. Type h for commands.\n",
                 gym::equipmentName(BEACON_EQUIPMENT_TYPE), BEACON_MACHINE_INSTANCE);
   printStatus();
 }
@@ -422,6 +482,8 @@ void onExtraHelp() { g_weight.printHelp(); }
 const TuningConsole::Hooks kConsoleHooks = {printStatus,  printConfig,    onSettingsChanged, onRecalibrate,
                                             onResetCount, onExtraCommand, onExtraHelp};
 TuningConsole g_console(g_settings, kConsoleHooks);
+TuningConsole::Line g_usbLine;
+TuningConsole::Line g_phoneLine;
 
 // Teleplot (VS Code extension) plots lines of the form ">name:value". Prints the sample the 50 Hz
 // sampler just took (the same one the weight recorder stores), never reading the sensors itself.
@@ -462,8 +524,12 @@ void setup() {
     delay(2000);
   }
 
+  ble_console::configure();  // before Bluefruit starts (inside g_adv.begin)
   const bool bleOk = g_adv.begin(BEACON_TX_POWER_DBM, BEACON_ADV_INTERVAL_MS);
   if (!bleOk) LOG("[err] Bluefruit did not start\n");
+#if BEACON_BLE_CONSOLE
+  if (bleOk && !ble_console::begin(millis())) LOG("[err] Bluetooth console did not start\n");
+#endif
   g_counter.seedSetSeq(randomByte());  // random, so a reboot does not repeat the last set number
   // After Bluefruit: the taught weights live in its flash file system, and flash writes only
   // complete while the SoftDevice runs.
@@ -473,7 +539,10 @@ void setup() {
   calibrate(millis());
   g_lastHousekeepingMs = millis();
   g_hostConnected = Serial;  // a monitor that is already open gets the banner once, here
-  if (g_hostConnected) printBanner();
+  if (g_hostConnected) {
+    ConsoleOut::Only usbOnly(Console, ConsoleOut::kUsb);
+    printBanner();
+  }
 }
 
 void loop() {
@@ -494,7 +563,8 @@ void loop() {
   // The weight recorder samples on battery too: its deadline is not gated on USB.
   if (g_weight.sampling()) consider(g_weight.nextSampleMs());
   consider(g_lastHousekeepingMs + BEACON_HOUSEKEEPING_MS);
-  if (usb && wait > kConsoleTickMs) wait = kConsoleTickMs;
+  // A console is open (USB, or a phone on Bluetooth): look for typed commands every 50 ms.
+  if ((usb || ble_console::connected()) && wait > kConsoleTickMs) wait = kConsoleTickMs;
   if (usb && g_weight.dumping() && wait > kDumpTickMs) wait = kDumpTickMs;
   if (g_serviceNow) wait = 0;
 
@@ -515,6 +585,9 @@ void loop() {
     g_repeatPending = false;
     advertise(g_lastFrame, now);
   }
+  maybeSendStatus(now);  // loop() runs at least every 2 s (housekeeping), which is soon enough
+  const bool phoneJustListening = ble_console::poll(now);  // before the advertising decision
+  syncConsoleAdvertising(now);
 
   if (g_weight.tick(now) && usb && g_console.streaming()) streamSample();
 
@@ -525,12 +598,24 @@ void loop() {
 
   if (usb) {
     const bool host = Serial;
-    if (host && !g_hostConnected) printBanner();
+    if (host && !g_hostConnected) {
+      ConsoleOut::Only usbOnly(Console, ConsoleOut::kUsb);
+      printBanner();
+    }
     g_hostConnected = host;
-    g_console.poll();
+    g_console.poll(Serial, g_usbLine);
     g_weight.pumpDump();
   } else {
     g_hostConnected = false;
+  }
+  if (phoneJustListening) {
+    ConsoleOut::Only phoneOnly(Console, ConsoleOut::kPhone);
+    printBanner();
+  }
+  if (ble_console::ready()) {
+    const bool messageEnded = ble_console::takeMessageEnded();  // before reading: see ble_console.h
+    g_console.poll(ble_console::input(), g_phoneLine);
+    if (messageEnded) g_console.endLine(g_phoneLine);
   }
   g_weight.setStreaming(usb && g_console.streaming(), now);
 }

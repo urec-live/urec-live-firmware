@@ -213,8 +213,10 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 | `beacon_config.h` | all settings: identity, pin, thresholds, timings, radio |
 | `motion_settings.*` | modes, presets, and turning "rest + delta" into `PhaseSpec`s |
 | `lis3dh_motion.*` | the register-level driver from §4 |
-| `ibeacon_adv.*` | Bluefruit advertising bursts |
-| `tuning_console.*` | the USB serial commands (§7) |
+| `ibeacon_adv.*` | Bluefruit advertising bursts: the iBeacon rep frame and the battery status frame (§5.5), and the Bluetooth console's connectable advertisement between bursts (§7) |
+| `battery.*` | reads the LiPo voltage through the Feather's VBAT divider (§5.5) |
+| `tuning_console.*` | the console commands, on USB and on a phone (§7) |
+| `ble_console.*`, `console_out.*` | the Bluetooth console for a phone, and the output that goes to USB and/or the phone (§7) |
 | `main.cpp` | boot sequence, sleep loop, interrupt handling, calibration |
 | `weight_sensing.*`, `set_recorder.*`, `tmag5273_mag.*`, `magnetometer.h`, `weight_settings.h` | weight sensing with a magnetometer ([weight-sensing.md](weight-sensing.md) §6) |
 
@@ -224,10 +226,11 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 2. **`pinMode(D5, INPUT_PULLDOWN)`.** A shaken-loose jumper then reads LOW instead of floating and firing random reps.
 3. **Create the semaphore, then `attachInterrupt(D5, onInt1Rise, RISING)`.** This happens *before* the sensor is configured, so no edge can be lost or arrive before the semaphore exists.
 4. **`Wire.begin()` at 400 kHz, then `Lis3dhMotion::begin()`:** checks `WHO_AM_I` = 0x33 and writes §4. Without a sensor the beacon logs an error, blinks and retries every 2 s.
-5. **Start the Bluefruit stack (SoftDevice S140)** as a non-connectable, non-scannable advertiser at +4 dBm, with the blue "connection" LED disabled.
+5. **Start the Bluefruit stack (SoftDevice S140)** at +4 dBm, with the blue "connection" LED disabled. Rep and status bursts are non-connectable and non-scannable. The Bluetooth console's UART service starts here too, and between bursts the beacon advertises as connectable for a phone (§7).
 6. **Seed the set sequence number** from the SoftDevice's hardware random-number generator. A rebooted beacon then does not reuse the last set's number.
 7. **Look for a magnetometer** for weight sensing and load its taught weights. This comes after Bluefruit, because the weights live in its flash file system ([weight-sensing.md](weight-sensing.md) §6.1).
 8. **Wait 0.5 s** (hands off), **calibrate** (§3.6), **arm the count phase**.
+9. The first pass of `loop()` sends the **battery status frame** (§5.5), so the gateway learns the battery level right after a reset or a battery swap.
 
 ### 5.2 Sleeping
 
@@ -237,7 +240,7 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 - the set timeout
 - the 2 s housekeeping tick
 - the 50 Hz sampler while a set is recorded for weight sensing (on battery too) or while streaming
-- with USB power present, also the 50 ms console tick
+- while USB power is present or a phone is connected to the Bluetooth console, also the 50 ms console tick
 
 It then calls `xSemaphoreTake(sem, time until that deadline)`. While the loop task waits, FreeRTOS has nothing to run. The Adafruit core's tickless idle then puts the chip into System ON sleep via `sd_app_evt_wait()`. The CPU wakes for exactly two reasons:
 - the **INT1 rising edge**: the tiny ISR `onInt1Rise()` only calls `xSemaphoreGiveFromISR`;
@@ -292,6 +295,27 @@ So the full UUID is `6D1E3F2A-9B47-4C85-A0E2-7F31C558` + `0001`. `gym::encodeIBe
 
 The radio is completely off between bursts. Per rep that is 2 bursts × 2 events. Every packet carries the *total*, so a lost packet costs nothing unless it is the last one; the repeat burst covers that case.
 
+**Status frame (battery level).** The iBeacon payload uses 30 of a legacy advertisement's 31 bytes, so the battery voltage travels in a second, separate advertisement:
+
+| Bytes | Value | Meaning |
+|---|---|---|
+| 0–2 | `02 01 06` | AD flags, as above |
+| 3–4 | `0E FF` | AD length 14, manufacturer-specific data |
+| 5–6 | `FF FF` | company ID 0xFFFF: the Bluetooth SIG's ID for tests and prototypes (a shipping product needs its own) |
+| 7–10 | `6D 1E 3F 2A` | first 4 bytes of the GetMeFit UUID: "this is GetMeFit" |
+| 11 | `01` | frame kind: status |
+| 12–13 | `00 01` | equipment type (1 = Leg Curl) |
+| 14 | `01` | machine instance (#1) |
+| 15–16 | e.g. `0F 48` | battery voltage in mV (3912) |
+| 17 | `00` / `01` | flags. Bit 0 means USB power is present, so the reading is the charger's voltage and not the battery's. |
+
+It is not an iBeacon, so phones and other iBeacon scanners never mistake it for a rep count. `gym::encodeStatus()` and `gym::findStatusInPayload()` build and decode it, and both are unit-tested like the iBeacon.
+
+- **When:** once at boot, then every 5 min (`BEACON_STATUS_INTERVAL_MS`). It waits while a set is active or a rep burst is on the air or pending, so it never replaces a rep count. A rep counted during a status burst replaces the status burst instead.
+- **What:** the Feather's `VBAT` pin goes through an on-board 1:2 divider to A6 (`src/beacon/battery.cpp`). The beacon reads it 8 times against the 3.0 V internal reference, which doesn't sag with the battery. Each read uses a 10 µs acquisition time, because the divider is a ~50 kΩ source and the default 3 µs reads low. The radio is idle during the reading.
+- **No LED.** The red LED stays rep feedback.
+- On the console, `s` shows `battery 3.92 V (66 %), reported every 300 s`, and each status burst prints `[battery] 3.92 V (66 %), sent to the gateway`. On USB power both say that the reading is the charger's.
+
 ### 5.6 Set end and the drift check
 
 `RepCounter::poll()` ends the set 5 s after the last motion event:
@@ -317,11 +341,12 @@ The paper measured **30 µA** asleep and **40 µA** on average while in use, on 
 | nRF52840 System ON sleep + RTC | a few µA |
 | **Total while idle** | **~100 µA** |
 
-On the 400 mAh LiPo that is **roughly 5–6 months** idle. Not counted: the green power LED on each Adafruit breakout (about 0.1–0.2 mA each), which is more than all of the above. Remove it for battery use ([weight-sensing.md](weight-sensing.md) §3.3). Advertising adds very little, because the radio is on for ~150 ms twice per rep. Treat this as an estimate: measure it with a USB power meter or a multimeter in the battery lead before you rely on it.
+On the 400 mAh LiPo that is **roughly 5–6 months** idle. Not counted: the green power LED on each Adafruit breakout (about 0.1–0.2 mA each), which is more than all of the above. Remove it for battery use ([weight-sensing.md](weight-sensing.md) §3.3). Advertising adds very little, because the radio is on for ~150 ms twice per rep. The battery status burst every 5 min adds roughly 0.2 µA on average. Treat this as an estimate: measure it with a USB power meter or a multimeter in the battery lead before you rely on it.
 
 Things that cost power, and their switches:
 - **Red LED per rep:** `BEACON_LED_FEEDBACK 0`.
 - **USB connected:** the console wakes the CPU every 50 ms, but only while USB power is present.
+- **Bluetooth console:** connectable advertising every 500 ms for 10 min after power-up and after a phone disconnects; a connected phone adds its connection events and the 50 ms console tick. `BEACON_BLE_CONSOLE 0` turns it off.
 - **Streaming:** runs at 50 Hz.
 
 Going lower would mean a bare module like the paper's.
@@ -330,7 +355,7 @@ Going lower would mean a bare module like the paper's.
 
 ## 7. Tuning (bench first, then the machine)
 
-The defaults are starting points: every machine and lifter is different. The beacon has a serial console for tuning live. Open `pio device monitor -e beacon` and type:
+The defaults are starting points: every machine and lifter is different. The beacon has a console for tuning live, on USB and on a phone over Bluetooth (below). On USB, open `pio device monitor -e beacon` and type:
 
 | Command | Effect |
 |---|---|
@@ -347,6 +372,23 @@ The defaults are starting points: every machine and lifter is different. The bea
 | `reset` | end the current set now |
 | `cfg` | print the current settings as `#define` lines for `beacon_config.h` |
 | `mag`, `teach`, `weights`, `forget`, `dump`, `log` | weight sensing, see [weight-sensing.md](weight-sensing.md) §7 |
+
+### On a phone (Bluetooth)
+
+The same console runs over Bluetooth, so the beacon can be checked, tuned and taught with no cable (`ble_console.*`). It uses the Nordic UART Service, which most "BLE UART" apps speak.
+
+1. Install **Bluefruit Connect** (Adafruit, iOS and Android). nRF Connect and Serial Bluetooth Terminal work too.
+2. Power the beacon on, or unplug its LiPo and plug it back in. For 10 minutes it advertises as **GetMeFit Leg Curl #1**; the name follows `BEACON_EQUIPMENT_TYPE` and `BEACON_MACHINE_INSTANCE`.
+3. Connect to it and open **UART**. The beacon sends its banner and status.
+4. Type commands as on USB. Each message the app sends counts as one line, so its end-of-line setting does not matter.
+
+What to know:
+- Everything the console prints also goes to the phone: `[rep]`, `[set] done`, `[weight]`, `[cal]` and every reply. CSV dumps (`dump`, `log`) and the Teleplot stream are too long for the link and stay on USB.
+- The rep and status bursts go on while a phone is connected, so the gateway still counts. The beacon asks for a 30–60 ms connection interval with short (7.5 ms) connection events.
+- Output never waits for the phone. Up to 4 KB queues and a separate task sends it; anything beyond that is dropped, and the phone is told.
+- After a phone disconnects, the beacon advertises for another 10 minutes. Later than that, unplug and replug the LiPo. `BEACON_BLE_CONSOLE_WINDOW_S` sets the window (0 = whenever no phone is connected), and `BEACON_BLE_CONSOLE 0` turns the console off.
+- While it advertises, anyone in range can connect: there is no pairing. Keep the window short in a shared gym.
+- With USB and a phone both connected, both see every reply, but each sees only the commands typed on it.
 
 ### Seeing the signal (Teleplot)
 
@@ -393,13 +435,13 @@ You'll see `a` move around `rest`, the two threshold lines, `int` pulse when an 
 
 - **`setScanCallbacks(&cb, true)`:** `true` means "report duplicates". By default the Bluetooth controller reports each device address *once* per scan. A beacon whose minor changes from 3 to 4 would then never be heard again.
 - **`onResult()` runs in NimBLE's own task:**
-  1. It walks the raw payload in place with `gym::findIBeaconInPayload()`.
-  2. It ignores anything that isn't a GetMeFit iBeacon, such as phones and other beacons.
-  3. It copies `{type, instance, setSeq, reps, rssi, ms}` into a 64-entry FreeRTOS queue.
+  1. It walks the raw payload in place with `gym::findIBeaconInPayload()`, then with `gym::findStatusInPayload()` (the battery frame, §5.5).
+  2. It ignores anything that is neither, such as phones and other beacons.
+  3. It copies `{kind, type, instance, setSeq, reps, batteryMv, flags, rssi, ms}` into a 64-entry FreeRTOS queue.
 
   Nothing blocking ever happens there.
 
-`loop()` empties the queue. While `loop()` is busy with an HTTPS request, the scan keeps running and packets wait in the queue. If the queue ever fills, the callback compacts it to the **newest packet per beacon and set**. Counts are cumulative, so the newest packet carries everything the older ones did. This way neither a busy beacon nor one that has just gone quiet loses its final count. The ESP32-C3 shares one radio between Wi-Fi and BLE by time slices; the default Wi-Fi modem sleep must stay on for that, so the code never calls `WiFi.setSleep(false)`.
+`loop()` empties the queue. While `loop()` is busy with an HTTPS request, the scan keeps running and packets wait in the queue. If the queue ever fills, the callback compacts it to the **newest packet per beacon and set**, plus the newest status frame per beacon. Counts are cumulative, so the newest packet carries everything the older ones did. This way neither a busy beacon nor one that has just gone quiet loses its final count. The ESP32-C3 shares one radio between Wi-Fi and BLE by time slices; the default Wi-Fi modem sleep must stay on for that, so the code never calls `WiFi.setSleep(false)`.
 
 ### 8.2 Whitelist
 
@@ -433,12 +475,21 @@ For a second beacon:
   - A single "rep" is usually someone moving the selector pin, so 1-rep sets are neither "in use" nor recorded.
   - 5 minutes covers normal rest between sets.
 - **Uploads:** a machine is only marked for upload when the count, set, in-use flag or last-set reps change. Signal strength alone doesn't count.
+- **Battery** (status frames, `onStatus()`):
+  - A status frame only updates the battery fields. It never counts as a packet for the 8 s set gap or the 5 min idle time, so a beacon's heartbeat cannot keep a set open or a machine "in use".
+  - A reading is reported, which means printed and uploaded:
+    - the first time;
+    - when USB power comes or goes;
+    - when it has moved 20 mV from the last report (`GATEWAY_BATTERY_STEP_MV`), so ADC noise doesn't cause uploads;
+    - and at least every 30 min (`GATEWAY_BATTERY_REFRESH_MS`), so `battery/updatedAt` shows whether the reading is current. A beacon whose `updatedAt` is much older than 30 min has stopped transmitting, most likely because its battery is flat.
+  - The percentage comes from `gym::batteryPercent()`, a typical LiPo resting-voltage curve. Treat it as a guide only (±10 %).
 
 Every change prints the vector:
 
 ```
 [reps] LC001=7 (set 3, in use, -61 dBm) | LE001=0 | LP001=0 | SR001=0
 [set] LC001 set 3: 10 reps in 31.2 s
+[battery] LC001 3.92 V (66 %)
 ```
 
 ### 8.4 Firebase
@@ -456,6 +507,14 @@ PATCH https://<db>/gym/machines.json?print=silent&auth=<token>
 - Slash-separated keys update only those fields; other machines are untouched.
 - `{".sv":"timestamp"}` asks Firebase to fill in its own clock, because the gateway has no clock.
 - `print=silent` makes the reply an empty `204`.
+- **The beacon's battery** goes in the same PATCH, but only when a reading is reported (§8.3). It lives in its own child, so `battery/updatedAt` is the time of the reading, not of the last rep:
+
+  ```http
+  {"LC001/battery/mv":3920,"LC001/battery/pct":66,"LC001/battery/usb":false,
+   "LC001/battery/updatedAt":{".sv":"timestamp"}}
+  ```
+
+  `usb: true` means the beacon was on USB power: `mv` and `pct` then show the charger's voltage, not how full the battery is.
 
 **2. Finished sets:**
 
@@ -685,6 +744,6 @@ What is still open is **sending the weight on**: the estimate is only printed on
 - put the weight in a second AD structure next to the iBeacon. There is 1 byte left, so this would mean dropping the flags or switching to a custom manufacturer format with the Nordic test company ID;
 - use BLE 5 extended advertising, which both the nRF52840 and the ESP32-C3 support;
 - make the beacon scannable and put the weight in the scan response; the gateway would then need an *active* scan;
-- send a separate set-summary advertisement after each set.
+- send a separate set-summary advertisement after each set. The battery status frame (§5.5) already works this way, and its `kind` byte leaves room for a set-summary kind that carries the set sequence and the weight.
 
 On the gateway side, the weight would go into `BeaconPacket`, `MachineState` and `SetRecord`, then into the Firebase JSON. The backend's `WorkoutSet` already has `reps` and `weightLbs`.

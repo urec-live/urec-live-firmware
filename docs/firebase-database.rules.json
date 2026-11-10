@@ -6,7 +6,12 @@
       "machines": {
         "$code": {
           "reps": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 65535" },
-          "inUse": { ".validate": "newData.isBoolean()" }
+          "inUse": { ".validate": "newData.isBoolean()" },
+          "battery": {
+            "mv": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 65535" },
+            "pct": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100" },
+            "usb": { ".validate": "newData.isBoolean()" }
+          }
         }
       },
       "sets": {

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "beacon_config.h"
+#include "console_out.h"
 #include "lis2mdl_mag.h"
 #include "set_recorder.h"
 #include "tmag5273_mag.h"
@@ -16,7 +17,7 @@ using namespace Adafruit_LittleFS_Namespace;
 
 #define LOG(...)                                \
   do {                                          \
-    if (Serial) Serial.printf(__VA_ARGS__);     \
+    if (Console) Console.printf(__VA_ARGS__);   \
   } while (0)
 
 static_assert(BEACON_TMAG_OVERSAMPLE >= 1 && BEACON_TMAG_OVERSAMPLE <= 5,
@@ -427,51 +428,51 @@ void WeightSensing::finishSet(uint32_t now, uint32_t lastEventMs, uint8_t setSeq
 
 // "[weight] set 143: TMAG5273 ~50 (7/8 reps) | LIS2MDL ~50 (8/8 reps) | lift 27 cm"
 void WeightSensing::report(uint8_t setSeq) const {
-  if (!Serial) return;
+  if (!Console) return;
   if (motionError_ != nullptr) {
-    Serial.printf("[weight] set %u not weighed: %s\n", setSeq, motionError_);
+    Console.printf("[weight] set %u not weighed: %s\n", setSeq, motionError_);
     return;
   }
-  Serial.printf("[weight] set %u:", setSeq);
+  Console.printf("[weight] set %u:", setSeq);
   for (uint8_t k = 0; k < kMaxMagnetometers; k++) {
     if (!s_slot[k].inSet) continue;
     char text[96];
     describe(k, text, sizeof(text));
-    Serial.printf(" %s |", text);
+    Console.printf(" %s |", text);
   }
-  Serial.printf(" lift %u cm", (medianLiftMm(s_motion) + 5) / 10);
-  if (s_motion.adapted) Serial.printf(", dT %u ms", s_motion.minRepMsUsed);
+  Console.printf(" lift %u cm", (medianLiftMm(s_motion) + 5) / 10);
+  if (s_motion.adapted) Console.printf(", dT %u ms", s_motion.minRepMsUsed);
   bool untaught = featTotal() > 0;
   for (uint8_t k = 0; k < kMaxMagnetometers; k++) untaught = untaught && (s_slot[k].featN == 0 || s_model[k].size() == 0);
-  Serial.println(untaught ? " - type \"teach <weight>\"" : "");
+  Console.println(untaught ? " - type \"teach <weight>\"" : "");
 }
 
 // ---------------------------------------------------------------- console
 
 void WeightSensing::printHelp() const {
-  Serial.println(F("  mag                  magnetometer(s), field at rest, taught weights"));
-  Serial.println(F("  teach <w>            label the last set with weight w (teach 50, teach 12.5)"));
-  Serial.println(F("  weights              list the taught weights"));
-  Serial.println(F("  forget <w>|all       delete a taught weight"));
-  Serial.println(F("  dump                 print the last set as CSV (offline training)"));
-  Serial.println(F("  log                  toggle: dump every set automatically"));
+  Console.println(F("  mag                  magnetometer(s), field at rest, taught weights"));
+  Console.println(F("  teach <w>            label the last set with weight w (teach 50, teach 12.5)"));
+  Console.println(F("  weights              list the taught weights"));
+  Console.println(F("  forget <w>|all       delete a taught weight"));
+  Console.println(F("  dump                 print the last set as CSV (offline training)"));
+  Console.println(F("  log                  toggle: dump every set automatically"));
 }
 
 void WeightSensing::printSummary() const {
   if (!anyPresent()) {
-    Serial.println(F("weight: no magnetometer (looking again every 30 s)"));
+    Console.println(F("weight: no magnetometer (looking again every 30 s)"));
     return;
   }
-  Serial.print(F("weight:"));
+  Console.print(F("weight:"));
   bool first = true;
   for (uint8_t k = 0; k < kMaxMagnetometers; k++) {
     const MagSlot& s = s_slot[k];
     if (!s.present) continue;
-    Serial.printf("%s %s at 0x%02X, %u weights taught (%u reps)", first ? "" : ";", s.mag->name(), s.mag->address(),
+    Console.printf("%s %s at 0x%02X, %u weights taught (%u reps)", first ? "" : ";", s.mag->name(), s.mag->address(),
                   static_cast<unsigned>(labelCount(k)), static_cast<unsigned>(s_model[k].size()));
     first = false;
   }
-  Serial.println(recording_ ? ", recording" : "");
+  Console.println(recording_ ? ", recording" : "");
 }
 
 void WeightSensing::printWeights() const {
@@ -483,16 +484,16 @@ void WeightSensing::printWeights() const {
     uint16_t ls[gym::WeightModel::kMaxLabels];
     uint16_t cs[gym::WeightModel::kMaxLabels];
     const size_t n = s_model[k].labels(ls, cs, gym::WeightModel::kMaxLabels);
-    Serial.printf("weights %s:", s.mag->name());
-    if (n == 0) Serial.print(F(" none taught (do a set, then: teach <weight>)"));
+    Console.printf("weights %s:", s.mag->name());
+    if (n == 0) Console.print(F(" none taught (do a set, then: teach <weight>)"));
     for (size_t i = 0; i < n; i++) {
       char label[12];
       formatLabel(ls[i], label, sizeof(label));
-      Serial.printf(" %s (%u reps)%s", label, cs[i], i + 1 < n ? "," : "");
+      Console.printf(" %s (%u reps)%s", label, cs[i], i + 1 < n ? "," : "");
     }
-    Serial.println();
+    Console.println();
   }
-  if (!any) Serial.println(F("weights: no magnetometer"));
+  if (!any) Console.println(F("weights: no magnetometer"));
 }
 
 void WeightSensing::printStatus() const {
@@ -500,24 +501,24 @@ void WeightSensing::printStatus() const {
     const MagSlot& s = s_slot[k];
     if (!s.wanted) continue;
     if (!s.present) {
-      Serial.printf("%s: none at 0x%02X (looking again every 30 s)\n", s.mag->name(), s.mag->address());
+      Console.printf("%s: none at 0x%02X (looking again every 30 s)\n", s.mag->name(), s.mag->address());
       continue;
     }
-    Serial.printf("%s at 0x%02X: %s, %.1f C\n", s.mag->name(), s.mag->address(), s.awake ? "sampling" : "asleep",
+    Console.printf("%s at 0x%02X: %s, %.1f C\n", s.mag->name(), s.mag->address(), s.awake ? "sampling" : "asleep",
                   s.tempC10 / 10.0f);
     if (s.haveRest) {
-      Serial.printf("  field at rest after set %u: x %.1f, y %.1f, z %.1f uT\n", lastSetSeq_, s.rest[0] / 10.0f,
+      Console.printf("  field at rest after set %u: x %.1f, y %.1f, z %.1f uT\n", lastSetSeq_, s.rest[0] / 10.0f,
                     s.rest[1] / 10.0f, s.rest[2] / 10.0f);
     }
   }
   if (recording_) {
-    Serial.printf("recording: %.1f s, %u samples\n", (millis() - recordStartMs_) / 1000.0f,
+    Console.printf("recording: %.1f s, %u samples\n", (millis() - recordStartMs_) / 1000.0f,
                   static_cast<unsigned>(s_rec.size()));
   } else if (inSet_ && blocked_ != nullptr) {
-    Serial.printf("this set is not weighed: %s\n", blocked_);
+    Console.printf("this set is not weighed: %s\n", blocked_);
   }
-  if (!lastTaught_ && featTotal() > 0) Serial.printf("last set %u is ready to teach\n", lastSetSeq_);
-  Serial.printf("auto-dump %s, taught weights %s\n", logAll_ ? "on" : "off",
+  if (!lastTaught_ && featTotal() > 0) Console.printf("last set %u is ready to teach\n", lastSetSeq_);
+  Console.printf("auto-dump %s, taught weights %s\n", logAll_ ? "on" : "off",
                 flashOk_ ? "saved in flash" : "NOT saved (Bluetooth stack did not start)");
   printWeights();
 }
@@ -531,15 +532,15 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
     uint16_t label = 0;
     char text[12];
     if (!parseLabel(arg, &label)) {
-      Serial.println(F("usage: teach <weight>   e.g. teach 50 or teach 12.5"));
+      Console.println(F("usage: teach <weight>   e.g. teach 50 or teach 12.5"));
     } else if (featTotal() == 0) {
       if (lastEndedSeq_ != 0) {
-        Serial.printf("set %u was not weighed - nothing to teach (do another set)\n", lastEndedSeq_);
+        Console.printf("set %u was not weighed - nothing to teach (do another set)\n", lastEndedSeq_);
       } else {
-        Serial.println(F("no weighed set to teach from - do a set first"));
+        Console.println(F("no weighed set to teach from - do a set first"));
       }
     } else if (lastTaught_) {
-      Serial.println(F("that set is already taught - do another set"));
+      Console.println(F("that set is already taught - do another set"));
     } else {
       formatLabel(label, text, sizeof(text));
       lastTaught_ = true;
@@ -548,12 +549,12 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
         if (s.featN == 0) continue;
         const size_t added = s_model[k].add(label, s_feat[k], s.featN);
         if (added == 0) {
-          Serial.printf("%s: too many different weights (%u) - forget one first\n", s.mag->name(),
+          Console.printf("%s: too many different weights (%u) - forget one first\n", s.mag->name(),
                         static_cast<unsigned>(gym::WeightModel::kMaxLabels));
           continue;
         }
         const bool saved = saveModel(k, flashOk_);
-        Serial.printf("%s taught %s: %u reps of set %u (%u reps in total)%s\n", s.mag->name(), text,
+        Console.printf("%s taught %s: %u reps of set %u (%u reps in total)%s\n", s.mag->name(), text,
                       static_cast<unsigned>(added), lastSetSeq_, static_cast<unsigned>(s_model[k].size()),
                       saved ? "" : " - NOT saved to flash");
       }
@@ -562,7 +563,7 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
     uint16_t label = 0;
     const bool all = arg != nullptr && strcmp(arg, "all") == 0;
     if (!all && !parseLabel(arg, &label)) {
-      Serial.println(F("usage: forget <weight>|all"));
+      Console.println(F("usage: forget <weight>|all"));
       return true;
     }
     size_t removed = 0;
@@ -574,20 +575,23 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
       if (r > 0) saveModel(k, flashOk_);
       removed += r;
     }
-    Serial.printf("deleted %u reps\n", static_cast<unsigned>(removed));
+    Console.printf("deleted %u reps\n", static_cast<unsigned>(removed));
   } else if (strcmp(cmd, "dump") == 0) {
     if (!haveSet_) {
-      Serial.println(F("no recorded set yet"));
+      Console.println(F("no recorded set yet"));
     } else if (inSet_ && recording_) {
-      Serial.println(F("a set is being recorded - dump after it ends"));
+      Console.println(F("a set is being recorded - dump after it ends"));
     } else if (!rawValid_) {
-      Serial.println(F("a later set that was not weighed overwrote the samples - nothing to dump"));
+      Console.println(F("a later set that was not weighed overwrote the samples - nothing to dump"));
+    } else if (!Serial) {
+      Console.println(F("the CSV dump goes to the USB console only (too long for Bluetooth)"));
     } else {
       startDump();
     }
   } else if (strcmp(cmd, "log") == 0) {
     logAll_ = !logAll_;
-    Serial.printf("auto-dump %s\n", logAll_ ? "on" : "off");
+    Console.printf("auto-dump %s%s\n", logAll_ ? "on" : "off",
+                   logAll_ && !Serial ? " (the dumps go to the USB console only)" : "");
   } else {
     return false;
   }

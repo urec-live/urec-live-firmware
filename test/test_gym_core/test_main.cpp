@@ -1,4 +1,4 @@
-// On-device unit tests for lib/gym_core (protocol, rep counter, machine tracker, weight pipeline
+// On-device unit tests for lib/gym_core (protocol and status frame, rep counter, machine tracker, weight pipeline
 // and weight model). Run on either board:  pio test -e gateway   (or -e beacon). This replaces the
 // firmware on the board; upload the normal firmware again afterwards.
 #include <Arduino.h>
@@ -90,6 +90,95 @@ void test_find_in_payload() {
   TEST_ASSERT_FALSE(findIBeaconInPayload(p, 29, &out));  // truncated AD
   p[0] = 0x00;                                           // zero padding first: nothing to find
   TEST_ASSERT_FALSE(findIBeaconInPayload(p, 30, &out));
+}
+
+static StatusFrame sampleStatus() {
+  StatusFrame f;
+  f.equipmentType = kEquipLatPulldown;
+  f.machineInstance = 2;
+  f.batteryMv = 3912;
+  f.flags = kStatusUsbPower;
+  return f;
+}
+
+void test_status_layout_and_roundtrip() {
+  uint8_t d[kStatusDataLen];
+  encodeStatus(sampleStatus(), d);
+  TEST_ASSERT_EQUAL_HEX8(0xFF, d[0]);  // company ID 0xFFFF
+  TEST_ASSERT_EQUAL_HEX8(0xFF, d[1]);
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(kUuidBase, &d[2], 4);
+  TEST_ASSERT_EQUAL_HEX8(kStatusKind, d[6]);
+  TEST_ASSERT_EQUAL_HEX8(0x00, d[7]);
+  TEST_ASSERT_EQUAL_HEX8(0x03, d[8]);  // type = Lat Pulldown
+  TEST_ASSERT_EQUAL_HEX8(2, d[9]);
+  TEST_ASSERT_EQUAL_HEX8(0x0F, d[10]);  // 3912 = 0x0F48, big-endian
+  TEST_ASSERT_EQUAL_HEX8(0x48, d[11]);
+  TEST_ASSERT_EQUAL_HEX8(kStatusUsbPower, d[12]);
+  StatusFrame out;
+  TEST_ASSERT_TRUE(decodeStatus(d, sizeof(d), &out));
+  TEST_ASSERT_EQUAL_UINT16(kEquipLatPulldown, out.equipmentType);
+  TEST_ASSERT_EQUAL_UINT8(2, out.machineInstance);
+  TEST_ASSERT_EQUAL_UINT16(3912, out.batteryMv);
+  TEST_ASSERT_EQUAL_HEX8(kStatusUsbPower, out.flags);
+}
+
+void test_status_rejects_foreign() {
+  uint8_t d[kStatusDataLen];
+  StatusFrame out;
+  encodeStatus(sampleStatus(), d);
+  TEST_ASSERT_FALSE(decodeStatus(d, kStatusDataLen - 1, &out));  // wrong length
+  TEST_ASSERT_FALSE(decodeStatus(nullptr, kStatusDataLen, &out));
+  d[0] = 0x59;  // another company's data
+  TEST_ASSERT_FALSE(decodeStatus(d, kStatusDataLen, &out));
+  encodeStatus(sampleStatus(), d);
+  d[3] ^= 0xFF;  // someone else's test-ID prototype
+  TEST_ASSERT_FALSE(decodeStatus(d, kStatusDataLen, &out));
+  encodeStatus(sampleStatus(), d);
+  d[6] = 0x02;  // a frame kind this build does not know
+  TEST_ASSERT_FALSE(decodeStatus(d, kStatusDataLen, &out));
+}
+
+void test_status_and_ibeacon_not_confused() {
+  // A status advertisement exactly as the beacon sends it: flags + manufacturer data.
+  uint8_t s[3 + 2 + kStatusDataLen];
+  s[0] = 0x02;
+  s[1] = 0x01;
+  s[2] = 0x06;
+  s[3] = 1 + kStatusDataLen;
+  s[4] = kAdTypeManufacturerData;
+  encodeStatus(sampleStatus(), &s[5]);
+  StatusFrame st;
+  BeaconFrame bf;
+  TEST_ASSERT_TRUE(findStatusInPayload(s, sizeof(s), &st));
+  TEST_ASSERT_EQUAL_UINT16(3912, st.batteryMv);
+  TEST_ASSERT_FALSE(findIBeaconInPayload(s, sizeof(s), &bf));
+  TEST_ASSERT_FALSE(findStatusInPayload(s, sizeof(s) - 1, &st));  // truncated AD
+
+  uint8_t p[30];
+  p[0] = 0x02;
+  p[1] = 0x01;
+  p[2] = 0x06;
+  p[3] = 1 + kIBeaconDataLen;
+  p[4] = kAdTypeManufacturerData;
+  encodeIBeacon(sampleFrame(), &p[5]);
+  TEST_ASSERT_FALSE(findStatusInPayload(p, sizeof(p), &st));
+  TEST_ASSERT_TRUE(findIBeaconInPayload(p, sizeof(p), &bf));
+}
+
+void test_battery_percent() {
+  TEST_ASSERT_EQUAL_UINT8(0, batteryPercent(0));
+  TEST_ASSERT_EQUAL_UINT8(0, batteryPercent(3270));
+  TEST_ASSERT_EQUAL_UINT8(100, batteryPercent(4200));
+  TEST_ASSERT_EQUAL_UINT8(100, batteryPercent(4350));  // charger overshoot
+  TEST_ASSERT_EQUAL_UINT8(50, batteryPercent(3840));   // a table point
+  TEST_ASSERT_EQUAL_UINT8(45, batteryPercent(3820));   // halfway between 3800 (40) and 3840 (50)
+  uint8_t last = 0;
+  for (uint16_t mv = 3000; mv <= 4300; mv += 5) {  // never goes down as the voltage rises
+    const uint8_t pct = batteryPercent(mv);
+    TEST_ASSERT_TRUE(pct >= last);
+    TEST_ASSERT_TRUE(pct <= 100);
+    last = pct;
+  }
 }
 
 void test_next_set_seq() {
@@ -231,6 +320,8 @@ static TrackerConfig trkCfg() {
   c.setGapMs = 8000;
   c.idleMs = 300000;
   c.minRepsForUse = 2;
+  c.batteryStepMv = 20;
+  c.batteryRefreshMs = 1800000;
   return c;
 }
 
@@ -347,6 +438,57 @@ void test_tracker_ignores_bad_index_and_zero_reps() {
   t.onPacket(0, 1, 0, -60, 1000);
   TEST_ASSERT_FALSE(t.state(0).setOpen);
   TEST_ASSERT_TRUE(t.state(0).seen);
+}
+
+void test_tracker_battery_reporting() {
+  MachineTracker t(2, trkCfg());
+  TEST_ASSERT_FALSE(t.state(0).batteryKnown);
+  t.onStatus(0, 3900, false, 1000);
+  TEST_ASSERT_TRUE(t.takeBatteryDirty(0));  // first reading
+  TEST_ASSERT_TRUE(t.state(0).batteryKnown);
+  TEST_ASSERT_EQUAL_UINT16(3900, t.state(0).batteryMv);
+  TEST_ASSERT_FALSE(t.takeBatteryDirty(1));
+  TEST_ASSERT_FALSE(t.takeLiveDirty(0));  // battery is uploaded on its own flag
+  TEST_ASSERT_FALSE(t.state(0).seen);     // "seen" stays about rep packets
+
+  t.onStatus(0, 3890, false, 2000);  // ADC noise / slow drain below the step
+  TEST_ASSERT_FALSE(t.takeBatteryDirty(0));
+  TEST_ASSERT_EQUAL_UINT16(3890, t.state(0).batteryMv);  // the latest reading is kept anyway
+  t.onStatus(0, 3885, false, 3000);
+  TEST_ASSERT_FALSE(t.takeBatteryDirty(0));  // 15 mV from the last report: still under 20
+  t.onStatus(0, 3880, false, 4000);
+  TEST_ASSERT_TRUE(t.takeBatteryDirty(0));  // 20 mV from the last report, not from the last frame
+
+  t.onStatus(0, 4190, true, 5000);  // plugged into USB
+  TEST_ASSERT_TRUE(t.takeBatteryDirty(0));
+  TEST_ASSERT_TRUE(t.state(0).batteryOnUsb);
+  t.onStatus(0, 4190, false, 6000);  // unplugged, same voltage
+  TEST_ASSERT_TRUE(t.takeBatteryDirty(0));
+
+  t.onStatus(0, 4195, false, 6000 + 1799999);
+  TEST_ASSERT_FALSE(t.takeBatteryDirty(0));
+  t.onStatus(0, 4195, false, 6000 + 1800000);  // unchanged, but the last report is 30 min old
+  TEST_ASSERT_TRUE(t.takeBatteryDirty(0));
+
+  t.onStatus(5, 3900, false, 1000);  // bad index: ignored
+  TEST_ASSERT_FALSE(t.takeBatteryDirty(5));
+}
+
+void test_tracker_status_does_not_hold_sets_or_use() {
+  MachineTracker t(1, trkCfg());
+  t.onPacket(0, 5, 3, -60, 1000);
+  TEST_ASSERT_TRUE(t.state(0).inUse);
+  t.onStatus(0, 3900, false, 5000);  // status frames keep arriving after the set...
+  t.onStatus(0, 3900, false, 8500);
+  t.tick(9000);  // ...but the set still ends 8 s after its last rep packet
+  TEST_ASSERT_FALSE(t.state(0).setOpen);
+  SetRecord r;
+  TEST_ASSERT_TRUE(t.popSet(&r));
+  TEST_ASSERT_EQUAL_UINT32(1000, r.endMs);
+  for (uint32_t ms = 60000; ms < 301000; ms += 60000) t.onStatus(0, 3900, false, ms);
+  t.tick(301000);  // and the machine is released 5 min after the last rep packet
+  TEST_ASSERT_FALSE(t.state(0).inUse);
+  TEST_ASSERT_EQUAL_UINT32(1000, t.state(0).lastPacketMs);
 }
 
 // ---------------------------------------------------------------- weight pipeline
@@ -945,6 +1087,10 @@ void setup() {
   RUN_TEST(test_roundtrip);
   RUN_TEST(test_decode_rejects_foreign);
   RUN_TEST(test_find_in_payload);
+  RUN_TEST(test_status_layout_and_roundtrip);
+  RUN_TEST(test_status_rejects_foreign);
+  RUN_TEST(test_status_and_ibeacon_not_confused);
+  RUN_TEST(test_battery_percent);
   RUN_TEST(test_next_set_seq);
   RUN_TEST(test_counter_normal_reps);
   RUN_TEST(test_counter_pause_at_top_counts_once);
@@ -965,6 +1111,8 @@ void setup() {
   RUN_TEST(test_tracker_idle_releases_use);
   RUN_TEST(test_tracker_ring_overflow);
   RUN_TEST(test_tracker_ignores_bad_index_and_zero_reps);
+  RUN_TEST(test_tracker_battery_reporting);
+  RUN_TEST(test_tracker_status_does_not_hold_sets_or_use);
   RUN_TEST(test_w8_sine_upside_down);
   RUN_TEST(test_w8_asymmetric_min_jerk_height);
   RUN_TEST(test_w8_accelerometer_bias);

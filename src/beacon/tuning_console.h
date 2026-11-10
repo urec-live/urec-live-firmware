@@ -1,5 +1,6 @@
-// USB-serial tuning console for the beacon. Type `h` in the serial monitor for the command list.
-// Commands change MotionSettings live; `cfg` prints them as #defines for beacon_config.h.
+// Tuning console for the beacon, on the USB serial monitor and on a phone over Bluetooth
+// (ble_console.h). Type `h` for the command list. Commands change MotionSettings live; `cfg` prints
+// them as #defines for beacon_config.h. Replies go to every listener (console_out.h).
 #pragma once
 
 #include <Arduino.h>
@@ -19,10 +20,19 @@ class TuningConsole {
     void (*extraHelp)();
   };
 
+  // One per input, so lines typed on USB and on the phone never mix.
+  struct Line {
+    char buf[48];
+    uint8_t len = 0;
+  };
+
   TuningConsole(MotionSettings& settings, const Hooks& hooks) : s_(settings), hooks_(hooks) {}
 
-  // Non-blocking: consumes whatever bytes are waiting and runs complete lines.
-  void poll();
+  // Non-blocking: consumes whatever bytes `in` has waiting and runs every complete line.
+  void poll(Stream& in, Line& line);
+
+  // Runs what `line` holds as a command, newline or not (a phone app's Send ends a line).
+  void endLine(Line& line);
 
   bool streaming() const { return streaming_; }
 
@@ -32,7 +42,5 @@ class TuningConsole {
 
   MotionSettings& s_;
   Hooks hooks_;
-  char buf_[48];
-  uint8_t len_ = 0;
   bool streaming_ = false;
 };

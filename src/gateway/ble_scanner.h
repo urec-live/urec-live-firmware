@@ -1,4 +1,4 @@
-// Continuous passive BLE scan for GetMeFit iBeacons (NimBLE-Arduino 2.x).
+// Continuous passive BLE scan for GetMeFit iBeacons and status frames (NimBLE-Arduino 2.x).
 //
 // NimBLE calls onResult() in its own host task for every advertisement. The callback only
 // decodes and copies the packet into a FreeRTOS queue; loop() drains the queue. So scanning
@@ -9,11 +9,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum class PacketKind : uint8_t {
+  Reps,    // iBeacon rep frame
+  Status,  // status frame: battery voltage (gym_protocol.h)
+};
+
 struct BeaconPacket {
+  PacketKind kind;
   uint16_t equipmentType;
   uint8_t machineInstance;
-  uint8_t setSeq;
-  uint16_t reps;
+  uint8_t setSeq;       // Reps
+  uint16_t reps;        // Reps
+  uint16_t batteryMv;   // Status
+  uint8_t statusFlags;  // Status: gym::kStatus* bits
   int8_t rssi;
   uint32_t ms;  // millis() when received
 };

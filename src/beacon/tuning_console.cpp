@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "console_out.h"
+
 namespace {
 bool parseNumber(const char* text, long lo, long hi, long* out) {
   if (text == nullptr || *text == '\0') return false;
@@ -14,35 +16,38 @@ bool parseNumber(const char* text, long lo, long hi, long* out) {
 }
 }  // namespace
 
-void TuningConsole::poll() {
-  while (Serial.available() > 0) {
-    const int c = Serial.read();
+void TuningConsole::poll(Stream& in, Line& line) {
+  while (in.available() > 0) {
+    const int c = in.read();
     if (c < 0) break;
     if (c == '\r' || c == '\n') {
-      if (len_ > 0) {
-        buf_[len_] = '\0';
-        len_ = 0;
-        execute(buf_);
-      }
-    } else if (len_ < sizeof(buf_) - 1) {
-      buf_[len_++] = static_cast<char>(c);
+      endLine(line);
+    } else if (line.len < sizeof(line.buf) - 1) {
+      line.buf[line.len++] = static_cast<char>(c);
     }
   }
 }
 
+void TuningConsole::endLine(Line& line) {
+  if (line.len == 0) return;
+  line.buf[line.len] = '\0';
+  line.len = 0;
+  execute(line.buf);
+}
+
 void TuningConsole::printHelp() {
-  Serial.println(F("commands:"));
-  Serial.println(F("  s                    status"));
-  Serial.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps, >bx >by >bz)"));
-  Serial.println(F("  mode stack|paper|lever   load that mode's preset"));
-  Serial.println(F("  dl <mg> / dh <mg>    count / re-arm delta"));
-  Serial.println(F("  durl <n> / durh <n>  count / re-arm duration in samples (20 ms)"));
-  Serial.println(F("  hold <ms>            hold-off after the re-arm event"));
-  Serial.println(F("  minint <ms>          minimum time between counted reps"));
-  Serial.println(F("  axis x|y|z|auto      motion axis"));
-  Serial.println(F("  cal                  recalibrate (keep the beacon still)"));
-  Serial.println(F("  reset                end the current set"));
-  Serial.println(F("  cfg                  print settings as #defines for beacon_config.h"));
+  Console.println(F("commands:"));
+  Console.println(F("  s                    status"));
+  Console.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps, >bx >by >bz)"));
+  Console.println(F("  mode stack|paper|lever   load that mode's preset"));
+  Console.println(F("  dl <mg> / dh <mg>    count / re-arm delta"));
+  Console.println(F("  durl <n> / durh <n>  count / re-arm duration in samples (20 ms)"));
+  Console.println(F("  hold <ms>            hold-off after the re-arm event"));
+  Console.println(F("  minint <ms>          minimum time between counted reps"));
+  Console.println(F("  axis x|y|z|auto      motion axis"));
+  Console.println(F("  cal                  recalibrate (keep the beacon still)"));
+  Console.println(F("  reset                end the current set"));
+  Console.println(F("  cfg                  print settings as #defines for beacon_config.h"));
   if (hooks_.extraHelp != nullptr) hooks_.extraHelp();
 }
 
@@ -58,11 +63,15 @@ void TuningConsole::execute(char* line) {
     hooks_.printStatus();
   } else if (strcmp(cmd, "st") == 0) {
     streaming_ = !streaming_;
-    if (!streaming_) Serial.println(F("stream off"));
+    if (!streaming_) {
+      Console.println(F("stream off"));
+    } else if (!Serial) {
+      Console.println(F("stream on: its lines go to the USB console only"));
+    }
   } else if (strcmp(cmd, "mode") == 0) {
     MotionMode m;
     if (arg == nullptr || !parseMode(arg, &m)) {
-      Serial.println(F("usage: mode stack|paper|lever"));
+      Console.println(F("usage: mode stack|paper|lever"));
       return;
     }
     s_ = presetFor(m, s_.axis);
@@ -70,7 +79,7 @@ void TuningConsole::execute(char* line) {
   } else if (strcmp(cmd, "axis") == 0) {
     uint8_t a;
     if (arg == nullptr || !parseAxis(arg, &a)) {
-      Serial.println(F("usage: axis x|y|z|auto"));
+      Console.println(F("usage: axis x|y|z|auto"));
       return;
     }
     s_.axis = a;
@@ -102,6 +111,6 @@ void TuningConsole::execute(char* line) {
   } else if (hooks_.extraCommand != nullptr && hooks_.extraCommand(cmd, arg)) {
     // handled
   } else {
-    Serial.println(F("? (h for help)"));
+    Console.println(F("? (h for help)"));
   }
 }

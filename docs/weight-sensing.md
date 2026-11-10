@@ -292,7 +292,7 @@ t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid
 # end
 ```
 
-The dump is written a few lines at a time, only while the USB buffer has room, so a slow serial monitor never delays a rep. A new set aborts a dump in progress. Save it with the PlatformIO monitor's log filter or any terminal that logs to a file. For a labelled dataset, note the true weight of each set next to its `set=` number.
+The dump is written a few lines at a time, only while the USB buffer has room, so a slow serial monitor never delays a rep. A new set aborts a dump in progress. It goes to the USB console only: on the Bluetooth console ([walkthrough](rep-counting-walkthrough.md) §7) the `[weight]` line still arrives, but `dump` says the CSV needs USB. Save it with the PlatformIO monitor's log filter or any terminal that logs to a file. For a labelled dataset, note the true weight of each set next to its `set=` number.
 
 ---
 

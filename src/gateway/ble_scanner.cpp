@@ -13,13 +13,15 @@ volatile uint32_t g_dropped = 0;
 BeaconPacket* g_scratch = nullptr;  // compaction buffer, only used inside the NimBLE host task
 size_t g_scratchLen = 0;
 
+// Same beacon, same kind, and for rep frames the same set.
 bool sameSet(const BeaconPacket& a, const BeaconPacket& b) {
-  return a.equipmentType == b.equipmentType && a.machineInstance == b.machineInstance &&
-         a.setSeq == b.setSeq;
+  return a.kind == b.kind && a.equipmentType == b.equipmentType && a.machineInstance == b.machineInstance &&
+         (a.kind != PacketKind::Reps || a.setSeq == b.setSeq);
 }
 
 // Adds `p` to the first `n` scratch entries: a newer packet of the same beacon and set replaces the
-// older one (counts are cumulative, so it carries everything the old one did).
+// older one (counts are cumulative, so it carries everything the old one did; a newer status frame
+// is simply the newer reading).
 void mergeInto(size_t* n, const BeaconPacket& p) {
   for (size_t i = 0; i < *n; i++) {
     if (sameSet(g_scratch[i], p)) {
@@ -51,13 +53,24 @@ class ScanCallbacks : public NimBLEScanCallbacks {
   // Runs in the NimBLE host task: no Serial, no HTTP, no blocking.
   void onResult(const NimBLEAdvertisedDevice* device) override {
     const std::vector<uint8_t>& payload = device->getPayload();  // walked in place, no copies
+    BeaconPacket packet = {};
     gym::BeaconFrame frame;
-    if (!gym::findIBeaconInPayload(payload.data(), payload.size(), &frame)) return;
-    BeaconPacket packet;
-    packet.equipmentType = frame.equipmentType;
-    packet.machineInstance = frame.machineInstance;
-    packet.setSeq = frame.setSeq;
-    packet.reps = frame.reps;
+    gym::StatusFrame status;
+    if (gym::findIBeaconInPayload(payload.data(), payload.size(), &frame)) {
+      packet.kind = PacketKind::Reps;
+      packet.equipmentType = frame.equipmentType;
+      packet.machineInstance = frame.machineInstance;
+      packet.setSeq = frame.setSeq;
+      packet.reps = frame.reps;
+    } else if (gym::findStatusInPayload(payload.data(), payload.size(), &status)) {
+      packet.kind = PacketKind::Status;
+      packet.equipmentType = status.equipmentType;
+      packet.machineInstance = status.machineInstance;
+      packet.batteryMv = status.batteryMv;
+      packet.statusFlags = status.flags;
+    } else {
+      return;
+    }
     packet.rssi = device->getRSSI();
     packet.ms = millis();
     g_seen = g_seen + 1;

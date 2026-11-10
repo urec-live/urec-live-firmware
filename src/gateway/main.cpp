@@ -30,6 +30,8 @@ gym::TrackerConfig trackerConfig() {
   c.setGapMs = GATEWAY_SET_GAP_MS;
   c.idleMs = GATEWAY_MACHINE_IDLE_MS;
   c.minRepsForUse = GATEWAY_MIN_REPS_FOR_USE;
+  c.batteryStepMv = GATEWAY_BATTERY_STEP_MV;
+  c.batteryRefreshMs = GATEWAY_BATTERY_REFRESH_MS;
   return c;
 }
 
@@ -55,6 +57,7 @@ char g_bootId[9] = "00000000";  // random per boot: makes set keys unique across
 
 // Firebase: machines whose live state still has to be uploaded, and finished sets.
 bool g_fbLiveDirty[gym::MachineTracker::kMaxMachines] = {};
+bool g_fbBatteryDirty[gym::MachineTracker::kMaxMachines] = {};
 uint32_t g_lastLivePatchMs = 0;
 uint32_t g_livePatchWaitMs = 0;  // 0 = upload as soon as something changes
 gym::SetRecord g_pendingSets[kMaxPendingSets];
@@ -110,6 +113,16 @@ void printVector() {
   Serial.println();
 }
 
+void printBattery(size_t m) {
+  const gym::MachineState& st = g_tracker.state(m);
+  Serial.printf("[battery] %s %u.%02u V ", kMachines[m].code, st.batteryMv / 1000, (st.batteryMv % 1000) / 10);
+  if (st.batteryOnUsb) {
+    Serial.println("(beacon on USB power: the charger's voltage)");
+  } else {
+    Serial.printf("(%u %%)\n", gym::batteryPercent(st.batteryMv));
+  }
+}
+
 void queueSet(const gym::SetRecord& rec) {
   Serial.printf("[set] %s set %lu: %u reps in %.1f s\n", kMachines[rec.machine].code,
                 static_cast<unsigned long>(rec.setNumber), rec.reps, (rec.endMs - rec.startMs) / 1000.0f);
@@ -132,30 +145,41 @@ void queueSet(const gym::SetRecord& rec) {
 
 void uploadLive(uint32_t now) {
   bool any = false;
-  for (size_t m = 0; m < kMachineCount; m++) any = any || g_fbLiveDirty[m];
+  for (size_t m = 0; m < kMachineCount; m++) any = any || g_fbLiveDirty[m] || g_fbBatteryDirty[m];
   if (!any || !elapsed(now, g_lastLivePatchMs, g_livePatchWaitMs)) return;
   g_lastLivePatchMs = now;
 
-  // One multi-path PATCH updates every changed machine without touching the others.
+  // One multi-path PATCH updates every changed machine without touching the others. The battery
+  // is its own child, written only when it is reported, so its updatedAt is the reading's.
   JsonDocument doc;
   for (size_t m = 0; m < kMachineCount; m++) {
-    if (!g_fbLiveDirty[m]) continue;
     const gym::MachineState& st = g_tracker.state(m);
     const String k = String(kMachines[m].code) + "/";
-    doc[k + "name"] = kMachines[m].name;
-    doc[k + "type"] = gym::equipmentName(kMachines[m].equipmentType);
-    doc[k + "reps"] = st.liveReps();
-    doc[k + "setNumber"] = st.setNumber;
-    doc[k + "inUse"] = st.inUse;
-    doc[k + "lastSetReps"] = st.lastSetReps;
-    doc[k + "rssi"] = st.rssi;
-    doc[k + "updatedAt"][".sv"] = "timestamp";
+    if (g_fbLiveDirty[m]) {
+      doc[k + "name"] = kMachines[m].name;
+      doc[k + "type"] = gym::equipmentName(kMachines[m].equipmentType);
+      doc[k + "reps"] = st.liveReps();
+      doc[k + "setNumber"] = st.setNumber;
+      doc[k + "inUse"] = st.inUse;
+      doc[k + "lastSetReps"] = st.lastSetReps;
+      doc[k + "rssi"] = st.rssi;
+      doc[k + "updatedAt"][".sv"] = "timestamp";
+    }
+    if (g_fbBatteryDirty[m]) {
+      doc[k + "battery/mv"] = st.batteryMv;
+      doc[k + "battery/pct"] = gym::batteryPercent(st.batteryMv);
+      doc[k + "battery/usb"] = st.batteryOnUsb;  // true: mv/pct are the charger's, not the battery's
+      doc[k + "battery/updatedAt"][".sv"] = "timestamp";
+    }
   }
   String body;
   serializeJson(doc, body);
   const int code = g_firebase.patch(GATEWAY_FIREBASE_ROOT "/machines", body);
   if (httpOk(code)) {
-    for (size_t m = 0; m < kMachineCount; m++) g_fbLiveDirty[m] = false;
+    for (size_t m = 0; m < kMachineCount; m++) {
+      g_fbLiveDirty[m] = false;
+      g_fbBatteryDirty[m] = false;
+    }
     g_livePatchWaitMs = GATEWAY_FIREBASE_MIN_INTERVAL_MS;
     g_led.flash(0, 40, 0);
   } else {
@@ -371,6 +395,11 @@ void loop() {
       noteUnknownBeacon(packet);
       continue;
     }
+    if (packet.kind == PacketKind::Status) {
+      g_tracker.onStatus(static_cast<size_t>(m), packet.batteryMv, (packet.statusFlags & gym::kStatusUsbPower) != 0,
+                         packet.ms);
+      continue;
+    }
     g_tracker.onPacket(static_cast<size_t>(m), packet.setSeq, packet.reps, packet.rssi, packet.ms);
     g_led.flash(0, 0, 40, 20);
   }
@@ -385,6 +414,10 @@ void loop() {
       vectorChanged = true;
     }
     if (g_tracker.takeUseChanged(m)) onUseChanged(m, now);
+    if (g_tracker.takeBatteryDirty(m)) {
+      g_fbBatteryDirty[m] = true;
+      printBattery(m);
+    }
   }
   gym::SetRecord rec;
   while (g_tracker.popSet(&rec)) queueSet(rec);
