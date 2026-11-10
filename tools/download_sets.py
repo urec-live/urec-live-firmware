@@ -82,6 +82,10 @@ def download(ser) -> tuple[list[Record], int | None]:
     records: list[Record] = []
     current = None
     total = None
+    # The beacon keeps a half-typed line from an earlier connection (a monitor closed before
+    # Enter): end it first, so `dumpall` arrives on a line of its own. Its "?" reply is dropped.
+    ser.write(b"\n")
+    time.sleep(0.5)
     ser.reset_input_buffer()
     ser.write(b"dumpall\n")
     for line in read_lines(ser, IDLE_TIMEOUT_S):
