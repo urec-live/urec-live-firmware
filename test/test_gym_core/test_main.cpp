@@ -11,6 +11,7 @@
 #include "gym_protocol.h"
 #include "machine_tracker.h"
 #include "rep_counter.h"
+#include "set_store_format.h"
 #include "weight_model.h"
 #include "weight_pipeline.h"
 
@@ -1080,6 +1081,94 @@ void test_w8_model_full_evicts_most_taught() {
   TEST_ASSERT_EQUAL_UINT16(20, cs[1]);
 }
 
+// ---------------------------------------------------------------- set store format
+
+static StoredSetHeader sampleStoredHeader() {
+  StoredSetHeader h;
+  h.metaBytes = 300;
+  h.samples = 1000;
+  h.bodyBytes = 300 + 1000 * kStoreRowBytes;
+  h.crc = 0xDEADBEEF;
+  h.bootId = 0xA1B2;
+  h.index = 7;
+  h.uptimeMs = 123456789;
+  h.setSeq = 114;
+  h.sensors = 3;
+  h.reps = 8;
+  return h;
+}
+
+void test_store_crc32_matches_zlib() {
+  const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+  TEST_ASSERT_EQUAL_HEX32(0xCBF43926, crc32Update(0, check, sizeof(check)));  // the standard check value
+  const uint32_t part = crc32Update(0, check, 4);
+  TEST_ASSERT_EQUAL_HEX32(0xCBF43926, crc32Update(part, check + 4, sizeof(check) - 4));  // in pieces
+  TEST_ASSERT_EQUAL_HEX32(0, crc32Update(0, check, 0));
+}
+
+void test_store_header_roundtrip_and_layout() {
+  uint8_t raw[kStoreHeaderBytes];
+  const StoredSetHeader in = sampleStoredHeader();
+  encodeStoredHeader(in, raw);
+  TEST_ASSERT_EQUAL_HEX8('G', raw[0]);
+  TEST_ASSERT_EQUAL_HEX8('M', raw[1]);
+  TEST_ASSERT_EQUAL_HEX8('F', raw[2]);
+  TEST_ASSERT_EQUAL_HEX8('S', raw[3]);
+  TEST_ASSERT_EQUAL_HEX8(114, raw[28]);
+  TEST_ASSERT_EQUAL_HEX8(kStoreRowBytes, raw[31]);
+  StoredSetHeader out;
+  TEST_ASSERT_TRUE(decodeStoredHeader(raw, 1u << 21, &out));
+  TEST_ASSERT_EQUAL_UINT32(in.bodyBytes, out.bodyBytes);
+  TEST_ASSERT_EQUAL_HEX32(in.crc, out.crc);
+  TEST_ASSERT_EQUAL_UINT16(in.metaBytes, out.metaBytes);
+  TEST_ASSERT_EQUAL_UINT16(in.samples, out.samples);
+  TEST_ASSERT_EQUAL_HEX16(in.bootId, out.bootId);
+  TEST_ASSERT_EQUAL_UINT16(in.index, out.index);
+  TEST_ASSERT_EQUAL_UINT32(in.uptimeMs, out.uptimeMs);
+  TEST_ASSERT_EQUAL_UINT8(in.setSeq, out.setSeq);
+  TEST_ASSERT_EQUAL_UINT8(in.sensors, out.sensors);
+  TEST_ASSERT_EQUAL_UINT8(in.reps, out.reps);
+}
+
+void test_store_header_rejects_bad_records() {
+  uint8_t raw[kStoreHeaderBytes];
+  StoredSetHeader out;
+  memset(raw, 0xFF, sizeof(raw));  // erased flash, or a record cut short before its header
+  TEST_ASSERT_FALSE(decodeStoredHeader(raw, 1u << 21, &out));
+  StoredSetHeader h = sampleStoredHeader();
+  encodeStoredHeader(h, raw);
+  TEST_ASSERT_FALSE(decodeStoredHeader(raw, storedRecordBytes(h.bodyBytes) - 1, &out));  // runs past the end
+  TEST_ASSERT_TRUE(decodeStoredHeader(raw, storedRecordBytes(h.bodyBytes), &out));
+  h.bodyBytes += 1;  // sizes that do not add up
+  encodeStoredHeader(h, raw);
+  TEST_ASSERT_FALSE(decodeStoredHeader(raw, 1u << 21, &out));
+  encodeStoredHeader(sampleStoredHeader(), raw);
+  raw[4] = 2;  // another version
+  TEST_ASSERT_FALSE(decodeStoredHeader(raw, 1u << 21, &out));
+}
+
+void test_store_record_size_and_rows() {
+  TEST_ASSERT_EQUAL_UINT32(36, storedRecordBytes(1));
+  TEST_ASSERT_EQUAL_UINT32(36, storedRecordBytes(4));
+  TEST_ASSERT_EQUAL_UINT32(40, storedRecordBytes(5));
+  StoredRow in;
+  in.tMs = 65000;
+  const int16_t acc[3] = {-1000, 0, 1047};
+  const int16_t mag[2][3] = {{-32768, 32767, -5}, {123, -456, 789}};
+  memcpy(in.acc, acc, sizeof(acc));
+  memcpy(in.mag, mag, sizeof(mag));
+  in.valid = 3;
+  uint8_t raw[kStoreRowBytes];
+  encodeStoredRow(in, raw);
+  StoredRow out;
+  decodeStoredRow(raw, &out);
+  TEST_ASSERT_EQUAL_UINT16(in.tMs, out.tMs);
+  TEST_ASSERT_EQUAL_INT16_ARRAY(in.acc, out.acc, 3);
+  TEST_ASSERT_EQUAL_INT16_ARRAY(in.mag[0], out.mag[0], 3);
+  TEST_ASSERT_EQUAL_INT16_ARRAY(in.mag[1], out.mag[1], 3);
+  TEST_ASSERT_EQUAL_UINT8(3, out.valid);
+}
+
 void setup() {
   delay(2000);  // let the board's USB serial come up before Unity starts printing
   UNITY_BEGIN();
@@ -1139,6 +1228,10 @@ void setup() {
   RUN_TEST(test_w8_model_zero_spread_and_two_reps);
   RUN_TEST(test_w8_model_serialize_roundtrip);
   RUN_TEST(test_w8_model_full_evicts_most_taught);
+  RUN_TEST(test_store_crc32_matches_zlib);
+  RUN_TEST(test_store_header_roundtrip_and_layout);
+  RUN_TEST(test_store_header_rejects_bad_records);
+  RUN_TEST(test_store_record_size_and_rows);
   UNITY_END();
 }
 

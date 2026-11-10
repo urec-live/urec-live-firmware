@@ -219,6 +219,7 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 | `ble_console.*`, `console_out.*` | the Bluetooth console for a phone, and the output that goes to USB and/or the phone (§7) |
 | `main.cpp` | boot sequence, sleep loop, interrupt handling, calibration |
 | `weight_sensing.*`, `set_recorder.*`, `tmag5273_mag.*`, `magnetometer.h`, `weight_settings.h` | weight sensing with a magnetometer ([weight-sensing.md](weight-sensing.md) §6) |
+| `set_store.*`, `qspi_flash.*` | every recorded set kept in the 2 MB QSPI flash, downloaded later with `tools/download_sets.py` ([weight-sensing.md](weight-sensing.md) §8.1) |
 
 ### 5.1 Boot order (`setup()`)
 
@@ -386,6 +387,7 @@ What to know:
 - Everything the console prints also goes to the phone: `[rep]`, `[set] done`, `[weight]`, `[cal]` and every reply. CSV dumps (`dump`, `log`) and the Teleplot stream are too long for the link and stay on USB.
 - The rep and status bursts go on while a phone is connected, so the gateway still counts. The beacon asks for a 30–60 ms connection interval with short (7.5 ms) connection events.
 - Output never waits for the phone. Up to 4 KB queues and a separate task sends it; anything beyond that is dropped, and the phone is told.
+- `s` says where the console stands: `bluetooth console: phone connected`, `advertising for 420 more s`, or `not advertising (window over ...)`. A connected phone stops the advertising, so a second phone, or an app that reconnects by itself, keeps others from finding the beacon.
 - After a phone disconnects, the beacon advertises for another 10 minutes. Later than that, unplug and replug the LiPo. `BEACON_BLE_CONSOLE_WINDOW_S` sets the window (0 = whenever no phone is connected), and `BEACON_BLE_CONSOLE 0` turns the console off.
 - While it advertises, anyone in range can connect: there is no pairing. Keep the window short in a shared gym.
 - With USB and a phone both connected, both see every reply, but each sees only the commands typed on it.
@@ -699,9 +701,9 @@ This **replaces the firmware** on that board, so upload the normal firmware agai
 
 The paper did 3 sets of 10 reps on leg curl, leg extension and lat pulldown. It compared the true count with the dashboard (90.5%) and the watch (94.6%). To do the same:
 
-1. Mount the beacon (§7), tune it, and put the gateway within ~10 m. Check the RSSI in the `[reps]` line: −85 dBm or better is comfortable.
+1. Mount the beacon (§7), tune it from the phone console (§7, "On a phone"), and put the gateway within ~10 m. Check the RSSI in the `[reps]` line: −85 dBm or better is comfortable.
 2. Do 3 sets × 10 reps per machine. Include **one set with a 1–2 s pause at the top** and **one very slow set**. Those break single-trigger counters, and the slow set shows whether `dl 48` is needed (§3.2).
-3. For each set, record the truth, the beacon count (`[rep]` lines), the gateway's set record, and Firebase's `/gym/sets`.
+3. For each set, record the truth, the beacon count (`[rep]` lines, on the phone), the gateway's set record, and Firebase's `/gym/sets`.
 
 | Machine | Set | Truth | Beacon | Gateway | Firebase | Notes |
 |---|---|---|---|---|---|---|

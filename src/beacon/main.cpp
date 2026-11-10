@@ -423,6 +423,7 @@ void printStatus() {
   Console.print(F("battery "));
   printBattery(readBatteryMv(), usbPowered());
   Console.printf(", reported every %lu s\n", static_cast<unsigned long>(BEACON_STATUS_INTERVAL_MS / 1000));
+  ble_console::printStatus(Console, millis());
   g_weight.printSummary();
 }
 
@@ -475,7 +476,9 @@ void printBanner() {
   printStatus();
 }
 
-bool onExtraCommand(const char* cmd, const char* arg) { return g_weight.command(cmd, arg); }
+bool g_phoneCommand = false;  // the command being run came from the Bluetooth console
+
+bool onExtraCommand(const char* cmd, const char* arg) { return g_weight.command(cmd, arg, g_phoneCommand); }
 
 void onExtraHelp() { g_weight.printHelp(); }
 
@@ -532,8 +535,9 @@ void setup() {
 #endif
   g_counter.seedSetSeq(randomByte());  // random, so a reboot does not repeat the last set number
   // After Bluefruit: the taught weights live in its flash file system, and flash writes only
-  // complete while the SoftDevice runs.
-  g_weight.begin(Wire, g_imu, bleOk, millis());
+  // complete while the SoftDevice runs. The boot id goes with every stored set (set_store.h).
+  const uint16_t bootId = static_cast<uint16_t>((randomByte() << 8) | randomByte());
+  g_weight.begin(Wire, g_imu, bleOk, millis(), bootId);
 
   delay(500);  // let hands get off the board after a reset
   calibrate(millis());
@@ -614,8 +618,10 @@ void loop() {
   }
   if (ble_console::ready()) {
     const bool messageEnded = ble_console::takeMessageEnded();  // before reading: see ble_console.h
+    g_phoneCommand = true;
     g_console.poll(ble_console::input(), g_phoneLine);
     if (messageEnded) g_console.endLine(g_phoneLine);
+    g_phoneCommand = false;
   }
   g_weight.setStreaming(usb && g_console.streaming(), now);
 }

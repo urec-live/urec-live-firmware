@@ -6,7 +6,8 @@
 // the set ends (the rep counter's 5 s timeout) the recording runs through the paper's pipeline
 // (lib/gym_core/src/weight_pipeline.h) and every rep votes for one of the weights taught with
 // `teach` (weight_model.h). With both a TMAG5273 and an LIS2MDL fitted, each one is classified
-// separately and the results are printed side by side.
+// separately and the results are printed side by side. Every recorded set is then also kept in
+// the QSPI flash (set_store.h), for a download of the whole session later.
 //
 // The same 50 Hz sampler feeds the Teleplot stream. With no magnetometer on the bus and the stream
 // off, none of this adds a timer, a wake-up or any I2C traffic to the rep counting.
@@ -20,9 +21,10 @@
 
 class WeightSensing {
  public:
-  // Probes the magnetometers and loads their taught weights. flashOk: the SoftDevice is running, so
-  // flash writes complete (they would block forever otherwise).
-  void begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32_t now);
+  // Probes the magnetometers, loads their taught weights and finds the set store (set_store.h).
+  // flashOk: the SoftDevice is running, so writes to the internal flash complete (they would block
+  // forever otherwise). bootId: random, stored with each set to tell power-ups apart.
+  void begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32_t now, uint16_t bootId);
 
   // While no set is active: looks again for a magnetometer that did not answer (every 30 s).
   void housekeeping(uint32_t now);
@@ -44,16 +46,21 @@ class WeightSensing {
                  uint16_t minRepIntervalMs);
   void abortSet(uint32_t now);
 
-  // Console.
-  bool command(const char* cmd, const char* arg);
+  // Console. fromPhone: the command came from the Bluetooth console, which may not erase the
+  // stored sets or start a download (both are USB-only).
+  bool command(const char* cmd, const char* arg, bool fromPhone);
   void printHelp() const;
-  void printSummary() const;  // one line for the `s` status
-  bool dumping() const { return dumpSection_ != kDumpIdle; }
+  void printSummary() const;  // the weight and store lines of the `s` status
+  bool dumping() const;       // a CSV dump (`dump`) or a download (`dumpall`) is going to USB
   void pumpDump();  // writes as much of a pending CSV dump as the USB buffer takes
 
  private:
   enum DumpSection : uint8_t { kDumpIdle, kDumpSummary, kDumpError, kDumpRest, kDumpMagRest, kDumpCounts,
                                kDumpValleys, kDumpSegments, kDumpColumns, kDumpRows, kDumpEnd };
+  struct DumpCursor {
+    DumpSection section = kDumpIdle;
+    size_t index = 0;
+  };
 
   void probe(uint32_t now);
   void updatePower(uint32_t now);
@@ -61,9 +68,13 @@ class WeightSensing {
   size_t featTotal() const;
   void report(uint8_t setSeq) const;
   void printStatus() const;
+  void printSummaryWeight() const;
   void printWeights() const;
   void startDump();
-  bool nextDumpLine(char* line, size_t cap);
+  // The next line of the last set's CSV dump at cursor `c` (with its newline); false when a
+  // section ends without a line. The live dump and the set store each walk their own cursor.
+  bool nextDumpLine(DumpCursor& c, char* line, size_t cap) const;
+  void storeSet(uint8_t setSeq, uint32_t now);  // into the set store, right after the report
 
   TwoWire* wire_ = nullptr;
   Lis3dhMotion* imu_ = nullptr;
@@ -90,6 +101,5 @@ class WeightSensing {
   const char* motionError_ = nullptr;
   bool logAll_ = false;
 
-  DumpSection dumpSection_ = kDumpIdle;
-  size_t dumpIndex_ = 0;
+  DumpCursor dump_;  // the live `dump`
 };

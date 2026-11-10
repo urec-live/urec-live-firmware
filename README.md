@@ -11,7 +11,7 @@ TMAG5273 / LIS2MDL ─I2C─► same Feather: weighs each set (serial console)
 
 | Folder | What |
 |---|---|
-| `src/beacon/` | Feather nRF52840 Express firmware: two-phase LIS3DH interrupt rep counter, iBeacon bursts, battery status frames, tuning console on USB and on a phone over Bluetooth, magnetometer weight sensing |
+| `src/beacon/` | Feather nRF52840 Express firmware: two-phase LIS3DH interrupt rep counter, iBeacon bursts, battery status frames, tuning console on USB and on a phone over Bluetooth, magnetometer weight sensing, every set stored in flash for a later download |
 | `src/gateway/` | ESP32-C3-DevKitM-1 firmware: continuous BLE scan, set tracking, beacon battery levels, Firebase REST, UREC Live status |
 | `lib/gym_core/` | Board-independent C++: packet format, rep counter, machine tracker, weight pipeline and classifier |
 | `test/test_gym_core/` | Unity tests for `lib/gym_core` |

@@ -52,4 +52,7 @@ bool takeMessageEnded();
 // Connection bookkeeping, from loop(). Returns true when a phone has just started listening.
 bool poll(uint32_t now);
 
+// One line for the `s` status: a phone connected, or how long the beacon still advertises.
+void printStatus(Print& out, uint32_t now);
+
 }  // namespace ble_console

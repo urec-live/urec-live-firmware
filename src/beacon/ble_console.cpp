@@ -138,4 +138,21 @@ bool poll(uint32_t now) {
   return started;
 }
 
+void printStatus(Print& out, uint32_t now) {
+  if (!s_started) {
+    out.println(F("bluetooth console: off"));
+  } else if (ready()) {
+    out.println(F("bluetooth console: phone connected"));
+  } else if (connected()) {
+    out.println(F("bluetooth console: connected, but nothing is listening to the console output"));
+  } else if (BEACON_BLE_CONSOLE_WINDOW_S == 0) {
+    out.println(F("bluetooth console: advertising"));
+  } else if (wantsAdvertising(now)) {
+    const uint32_t leftS = static_cast<uint32_t>(BEACON_BLE_CONSOLE_WINDOW_S) - (now - s_windowStartMs) / 1000u;
+    out.printf("bluetooth console: advertising for %lu more s\n", static_cast<unsigned long>(leftS));
+  } else {
+    out.println(F("bluetooth console: not advertising (window over: replug the LiPo or press RESET)"));
+  }
+}
+
 }  // namespace ble_console

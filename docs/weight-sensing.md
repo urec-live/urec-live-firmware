@@ -262,9 +262,12 @@ All rep-counting commands from walkthrough §7 still work. New:
 | `forget <w>` / `forget all` | delete a taught weight / all of them |
 | `dump` | print the last set as CSV (§8) |
 | `log` | toggle: dump every set automatically when it ends |
+| `sets` | the set store (§8.1): how many sets are kept in flash and how full it is, then each set (the newest 10 on the phone) |
+| `dumpall` | print every stored set as CSV (USB only; `tools/download_sets.py` does it for you) |
+| `clearsets yes` | erase the stored sets (USB only; `clearsets` alone says how many there are) |
 | `st` | the Teleplot stream now also shows the field in µT: `>tx >ty >tz` (TMAG5273), `>lx >ly >lz` (LIS2MDL) |
 
-`s` shows one extra line, e.g. `weight: TMAG5273 at 0x35, 3 weights taught (42 reps)`.
+`s` shows two extra lines, e.g. `weight: TMAG5273 at 0x35, 3 weights taught (42 reps)` and `store: 12 sets, 290 of 2048 KB used`.
 
 **Units:** labels are plain numbers. Use the machine's unit; lb matches the UREC Live backend's `weightLbs`.
 
@@ -294,13 +297,40 @@ t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid
 
 The dump is written a few lines at a time, only while the USB buffer has room, so a slow serial monitor never delays a rep. A new set aborts a dump in progress. It goes to the USB console only: on the Bluetooth console ([walkthrough](rep-counting-walkthrough.md) §7) the `[weight]` line still arrives, but `dump` says the CSV needs USB. Save it with the PlatformIO monitor's log filter or any terminal that logs to a file. For a labelled dataset, note the true weight of each set next to its `set=` number.
 
+### 8.1 The set store: every set, downloaded later
+
+`dump` only has the last set, and only until the next one. So the beacon also keeps every recorded set in the Feather's 2 MB QSPI flash (`set_store.*`, `qspi_flash.*`), and they survive power-offs. A gym session can then run on the battery, with a phone as the console, and all its dumps come off at home:
+
+1. Plug the beacon into the laptop and close any serial monitor.
+2. Run `~/.platformio/penv/Scripts/python.exe tools/download_sets.py`. It sends `dumpall` and writes one CSV per set to `sessions/<date>_<time>_sets/<NNN>_set<seq>_boot<id>.csv`, then says how many arrived whole.
+3. When they all did, erase the store: run the tool again with `--clear`, or type `clearsets yes`.
+
+Each stored set prints exactly like `dump`, after one extra line, and with a CRC check before `# end`:
+
+```
+# stored index=3 boot=A1B2 set=143 reps=10 samples=1850 uptime_ms=812345
+# w8 set=143 reps=10 samples=1850 ...
+...
+# crc=ok
+# end
+```
+
+`set=` is the number the beacon printed for that set (`[weight] set 143: ...`), so match it with the set IDs in your notes. `boot=` changes at every power-up, because the set numbers restart then. After each set the beacon prints `[store] set 143 saved: 3 sets, 70 of 2048 KB (90 ms)`.
+
+How it works and what to know:
+- **Format:** a 32-byte header, the set's `#` lines as text, then 21 bytes per sample (`lib/gym_core/src/set_store_format.h`). A typical 8-rep set is about 25 KB, so the store holds about 80. When it is full, new sets are not stored (`[store] set N not saved: the store is full ...`); old ones are never overwritten.
+- **Timing:** writing a set takes about 0.1 s, right after its `[weight]` line, while the rep counter is idle. A rep in that moment still counts, a little late.
+- **Power loss:** the header is written last, so a set cut off mid-write never looks complete. The next set starts on a fresh 4 KB sector, and the scan at power-up steps over the damaged one (`s` then says "stepped over damaged data").
+- **Safety:** `dumpall` and `clearsets` work on the USB console only, so nobody on the Bluetooth console can erase the sets or start a download.
+- **Power:** between uses the flash is in deep power-down and the QSPI peripheral is off.
+
 ---
 
 ## 9. Teaching and testing at the gym (mirroring the paper's Table 6)
 
-1. Mount the beacon on the top plate and wait for `cal`. Check that `s` shows the magnetometer.
+1. Mount the beacon on the top plate, running on its battery, and wait for `cal`. Connect the phone console (walkthrough §7, "On a phone") and check that `s` shows the magnetometer. Type every command below there.
 2. **Teach** 3–4 weights you use, light and heavy. For each weight, do two sets: one full range, one about half range. Type `teach <w>` after each.
-3. **Test:** 3 sets per weight, without teaching. Write down what the beacon said.
+3. **Test:** 3 sets per weight, without teaching. Write down what the beacon said. Every set is also stored in its flash: download them all at home (§8.1).
 
 | Weight | Set | Truth | TMAG5273 | LIS2MDL | Lift | Notes |
 |---|---|---|---|---|---|---|
@@ -370,4 +400,4 @@ Run them with `pio test -e gateway` (walkthrough §11).
 ## 13. Next steps
 
 - **Sending the weight on:** the iBeacon frame is full. The options are listed in walkthrough §14: an extra advertisement, BLE 5 extended advertising, or a scan response. The gateway would then add the weight to its set records and to Firebase.
-- **Random forest:** collect CSV dumps with true weights, train with scikit-learn, export with emlearn.
+- **Random forest:** collect CSV dumps with true weights (a whole session at a time from the set store, §8.1), train with scikit-learn, export with emlearn.

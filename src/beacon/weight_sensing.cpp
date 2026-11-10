@@ -9,6 +9,8 @@
 #include "console_out.h"
 #include "lis2mdl_mag.h"
 #include "set_recorder.h"
+#include "set_store.h"
+#include "set_store_format.h"
 #include "tmag5273_mag.h"
 #include "weight_model.h"
 #include "weight_pipeline.h"
@@ -82,6 +84,8 @@ gym::WeightModel s_model[kMaxMagnetometers];
 uint8_t s_io[gym::WeightModel::kMaxSerializedBytes];
 int16_t s_latestB[kMaxMagnetometers][3];
 uint8_t s_latestValid = 0;
+SetStore s_store;  // every recorded set, in the QSPI flash (set_store.h)
+const uint16_t kPhoneListRows = 10;  // `sets` on the phone: the newest ones only
 
 bool elapsed(uint32_t now, uint32_t start, uint32_t duration) { return now - start >= duration; }
 
@@ -197,7 +201,7 @@ void describe(uint8_t k, char* out, size_t cap) {
 
 // ---------------------------------------------------------------- sensors
 
-void WeightSensing::begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32_t now) {
+void WeightSensing::begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32_t now, uint16_t bootId) {
   wire_ = &wire;
   imu_ = &imu;
   flashOk_ = flashOk;
@@ -208,6 +212,7 @@ void WeightSensing::begin(TwoWire& wire, Lis3dhMotion& imu, bool flashOk, uint32
     if (s.wanted && !s.present) LOG("[weight] no %s at 0x%02X\n", s.mag->name(), s.mag->address());
   }
   if (!anyPresent()) LOG("[weight] no magnetometer - weight sensing off\n");
+  if (!s_store.begin(bootId)) LOG("[store] no QSPI flash found - sets are not stored\n");
 }
 
 void WeightSensing::housekeeping(uint32_t now) {
@@ -336,8 +341,8 @@ void WeightSensing::startSet(uint32_t now, const char* blocked) {
     s_slot[k].lost = false;
   }
   magInSet_ = anyPresent();
-  if (dumping()) {
-    dumpSection_ = kDumpIdle;
+  if (dump_.section != kDumpIdle) {  // the live dump reads the recorder, which this set refills
+    dump_.section = kDumpIdle;
     LOG("# dump aborted: a new set started\n");
   }
   recording_ = magInSet_ && blocked == nullptr;
@@ -424,6 +429,60 @@ void WeightSensing::finishSet(uint32_t now, uint32_t lastEventMs, uint8_t setSeq
   }
   if (logAll_ && Serial) startDump();
   report(setSeq);
+  storeSet(setSeq, now);
+}
+
+// The set's CSV dump into the set store: its "# ..." lines as text, then its samples as binary rows
+// (set_store_format.h). `dumpall` prints it back exactly as `dump` would have.
+void WeightSensing::storeSet(uint8_t setSeq, uint32_t now) {
+  if (!s_store.ready()) return;
+  const uint32_t startMs = millis();
+  char line[128];
+  uint32_t metaBytes = 0;
+  DumpCursor c;
+  c.section = kDumpSummary;
+  while (c.section != kDumpColumns) {
+    if (nextDumpLine(c, line, sizeof(line))) metaBytes += strlen(line);
+  }
+  if (metaBytes > 0xFFFFu || s_set.n > 0xFFFFu) return;  // cannot happen with a 60 s recorder
+  const uint32_t bodyBytes = metaBytes + static_cast<uint32_t>(s_set.n) * gym::kStoreRowBytes;
+  const char* why = s_store.beginRecord(bodyBytes);
+  if (why != nullptr) {
+    LOG("[store] set %u not saved: %s\n", setSeq, why);
+    return;
+  }
+  bool ok = true;
+  c.section = kDumpSummary;
+  c.index = 0;
+  while (ok && c.section != kDumpColumns) {
+    if (nextDumpLine(c, line, sizeof(line))) ok = s_store.append(line, strlen(line));
+  }
+  for (size_t i = 0; ok && i < s_set.n; i++) {
+    gym::StoredRow r;
+    r.tMs = s_rec.timeMs(i);
+    memcpy(r.acc, s_rec.acc(i), sizeof(r.acc));
+    memcpy(r.mag[0], s_rec.mag(0, i), sizeof(r.mag[0]));
+    memcpy(r.mag[1], s_rec.mag(1, i), sizeof(r.mag[1]));
+    r.valid = s_rec.flags(i);
+    uint8_t raw[gym::kStoreRowBytes];
+    gym::encodeStoredRow(r, raw);
+    ok = s_store.append(raw, sizeof(raw));
+  }
+  gym::StoredSetHeader h = {};
+  h.metaBytes = static_cast<uint16_t>(metaBytes);
+  h.samples = static_cast<uint16_t>(s_set.n);
+  h.uptimeMs = now;
+  h.setSeq = setSeq;
+  h.sensors = static_cast<uint8_t>((s_slot[0].dumpInSet ? 1u : 0u) | (s_slot[1].dumpInSet ? 2u : 0u));
+  h.reps = static_cast<uint8_t>(lastCounted_ > 255 ? 255 : lastCounted_);
+  if (!ok || !s_store.commit(h)) {
+    s_store.abortRecord();
+    LOG("[store] set %u not saved: writing the flash failed\n", setSeq);
+    return;
+  }
+  LOG("[store] set %u saved: %u sets, %lu of %lu KB (%lu ms)\n", setSeq, s_store.count(),
+      static_cast<unsigned long>((s_store.usedBytes() + 1023) / 1024),
+      static_cast<unsigned long>(s_store.capacity() / 1024), static_cast<unsigned long>(millis() - startMs));
 }
 
 // "[weight] set 143: TMAG5273 ~50 (7/8 reps) | LIS2MDL ~50 (8/8 reps) | lift 27 cm"
@@ -456,9 +515,17 @@ void WeightSensing::printHelp() const {
   Console.println(F("  forget <w>|all       delete a taught weight"));
   Console.println(F("  dump                 print the last set as CSV (offline training)"));
   Console.println(F("  log                  toggle: dump every set automatically"));
+  Console.println(F("  sets                 the set store: every recorded set, kept in flash"));
+  Console.println(F("  dumpall              print every stored set as CSV (USB only; tools/download_sets.py)"));
+  Console.println(F("  clearsets yes        erase the stored sets (USB only)"));
 }
 
 void WeightSensing::printSummary() const {
+  printSummaryWeight();
+  s_store.printList(Console, 0);  // just its summary line
+}
+
+void WeightSensing::printSummaryWeight() const {
   if (!anyPresent()) {
     Console.println(F("weight: no magnetometer (looking again every 30 s)"));
     return;
@@ -523,7 +590,7 @@ void WeightSensing::printStatus() const {
   printWeights();
 }
 
-bool WeightSensing::command(const char* cmd, const char* arg) {
+bool WeightSensing::command(const char* cmd, const char* arg, bool fromPhone) {
   if (strcmp(cmd, "mag") == 0) {
     printStatus();
   } else if (strcmp(cmd, "weights") == 0) {
@@ -585,6 +652,8 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
       Console.println(F("a later set that was not weighed overwrote the samples - nothing to dump"));
     } else if (!Serial) {
       Console.println(F("the CSV dump goes to the USB console only (too long for Bluetooth)"));
+    } else if (s_store.dumping()) {
+      Console.println(F("a download (dumpall) is running - dump after it ends"));
     } else {
       startDump();
     }
@@ -592,6 +661,34 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
     logAll_ = !logAll_;
     Console.printf("auto-dump %s%s\n", logAll_ ? "on" : "off",
                    logAll_ && !Serial ? " (the dumps go to the USB console only)" : "");
+  } else if (strcmp(cmd, "sets") == 0) {
+    s_store.printList(Console, fromPhone ? kPhoneListRows : 0xFFFF);
+  } else if (strcmp(cmd, "dumpall") == 0) {
+    if (fromPhone || !Serial) {
+      Console.println(F("dumpall works on the USB console only: plug the beacon in, run tools/download_sets.py"));
+    } else if (!s_store.ready()) {
+      Console.println(F("no set store (no QSPI flash found)"));
+    } else if (s_store.count() == 0) {
+      Console.println(F("# stored end: 0 sets"));  // what tools/download_sets.py waits for
+    } else if (dump_.section != kDumpIdle) {
+      Console.println(F("a dump is running - try again after it ends"));
+    } else if (!s_store.startDump()) {
+      Console.println(F("the set store is busy or the flash did not answer"));
+    }
+  } else if (strcmp(cmd, "clearsets") == 0) {
+    if (fromPhone) {
+      Console.println(F("clearsets works on the USB console only"));
+    } else if (!s_store.ready()) {
+      Console.println(F("no set store (no QSPI flash found)"));
+    } else if (arg == nullptr || strcmp(arg, "yes") != 0) {
+      Console.printf("this erases the %u stored sets: download them first (tools/download_sets.py), then type: "
+                     "clearsets yes\n",
+                     s_store.count());
+    } else if (s_store.clear(Console)) {
+      Console.println(F("[store] cleared: 0 sets stored"));
+    } else {
+      Console.println(F("[store] could not clear: the store is busy or the flash did not answer"));
+    }
   } else {
     return false;
   }
@@ -603,40 +700,43 @@ bool WeightSensing::command(const char* cmd, const char* arg) {
 // The dump is written a few lines at a time from loop(), only while the USB buffer has room, so a
 // slow (or stuck) serial monitor never delays the rep counting.
 void WeightSensing::startDump() {
-  dumpSection_ = kDumpSummary;
-  dumpIndex_ = 0;
+  dump_.section = kDumpSummary;
+  dump_.index = 0;
 }
 
+bool WeightSensing::dumping() const { return dump_.section != kDumpIdle || s_store.dumping(); }
+
 void WeightSensing::pumpDump() {
-  if (!dumping()) return;
+  s_store.pumpDump();  // `dumpall`; never runs alongside the live dump
+  if (dump_.section == kDumpIdle) return;
   if (!Serial) {  // the monitor went away
-    dumpSection_ = kDumpIdle;
+    dump_.section = kDumpIdle;
     return;
   }
-  for (uint8_t lines = 0; lines < 32 && dumping() && Serial.availableForWrite() >= 128; lines++) {
+  for (uint8_t lines = 0; lines < 32 && dump_.section != kDumpIdle && Serial.availableForWrite() >= 128; lines++) {
     char line[128];
-    if (nextDumpLine(line, sizeof(line))) Serial.print(line);
+    if (nextDumpLine(dump_, line, sizeof(line))) Serial.print(line);
   }
 }
 
 // Produces the next dump line (with its newline); false when a section ends without a line.
-bool WeightSensing::nextDumpLine(char* line, size_t cap) {
+bool WeightSensing::nextDumpLine(DumpCursor& c, char* line, size_t cap) const {
   const size_t kPerLine = 10;
-  switch (dumpSection_) {
+  switch (c.section) {
     case kDumpSummary:
       snprintf(line, cap, "# w8 set=%u reps=%u samples=%u sensors=%s%s%s dT_ms=%u adapted=%u\n", lastSetSeq_,
                lastCounted_, static_cast<unsigned>(s_set.n), s_slot[0].dumpInSet ? "tmag" : "",
                s_slot[0].dumpInSet && s_slot[1].dumpInSet ? "+" : "", s_slot[1].dumpInSet ? "lis2mdl" : "",
                s_motion.minRepMsUsed, s_motion.adapted ? 1 : 0);
-      dumpSection_ = kDumpError;
+      c.section = kDumpError;
       return true;
     case kDumpError:  // own line: the longest message would not fit after the summary
       snprintf(line, cap, "# error=%s\n", motionError_ != nullptr ? motionError_ : "none");
-      dumpSection_ = kDumpRest;
+      c.section = kDumpRest;
       return true;
     case kDumpRest:
-      dumpSection_ = kDumpMagRest;
-      dumpIndex_ = 0;
+      c.section = kDumpMagRest;
+      c.index = 0;
       if (s_motion.restEnd == 0) {  // the set was rejected before a rest window was found
         snprintf(line, cap, "# rest=none\n");
         return true;
@@ -645,14 +745,14 @@ bool WeightSensing::nextDumpLine(char* line, size_t cap) {
                s_motion.gravityMg[0], s_motion.gravityMg[1], s_motion.gravityMg[2]);
       return true;
     case kDumpMagRest: {  // two lines per sensor that measured the set: its rest field, its error
-      if (dumpIndex_ >= 2u * kMaxMagnetometers) {
-        dumpSection_ = kDumpCounts;
-        dumpIndex_ = 0;
+      if (c.index >= 2u * kMaxMagnetometers) {
+        c.section = kDumpCounts;
+        c.index = 0;
         return false;
       }
-      const size_t part = dumpIndex_ % 2;
-      const MagSlot& s = s_slot[dumpIndex_ / 2];
-      dumpIndex_++;
+      const size_t part = c.index % 2;
+      const MagSlot& s = s_slot[c.index / 2];
+      c.index++;
       if (!s.dumpInSet) return false;
       if (part == 1) {
         snprintf(line, cap, "# %s error=%s\n", s.mag->name(),
@@ -667,45 +767,45 @@ bool WeightSensing::nextDumpLine(char* line, size_t cap) {
     }
     case kDumpCounts:
     case kDumpValleys: {
-      const bool counts = dumpSection_ == kDumpCounts;
+      const bool counts = c.section == kDumpCounts;
       const size_t total = counts ? s_set.countN : s_motion.valleyCount;
-      if (dumpIndex_ >= total) {
-        dumpSection_ = counts ? kDumpValleys : kDumpSegments;
-        dumpIndex_ = 0;
+      if (c.index >= total) {
+        c.section = counts ? kDumpValleys : kDumpSegments;
+        c.index = 0;
         return false;
       }
       size_t len = snprintf(line, cap, counts ? "# counts_ms=" : "# valleys=");
-      for (size_t k = 0; k < kPerLine && dumpIndex_ < total && len + 8 < cap; k++, dumpIndex_++) {
-        const unsigned v = counts ? s_set.countMs[dumpIndex_] : s_motion.valleys[dumpIndex_];
+      for (size_t k = 0; k < kPerLine && c.index < total && len + 8 < cap; k++, c.index++) {
+        const unsigned v = counts ? s_set.countMs[c.index] : s_motion.valleys[c.index];
         len += snprintf(line + len, cap - len, k == 0 ? "%u" : ",%u", v);
       }
       snprintf(line + len, cap - len, "\n");
       return true;
     }
     case kDumpSegments: {
-      if (dumpIndex_ >= s_motion.segCount) {
-        dumpSection_ = kDumpColumns;
+      if (c.index >= s_motion.segCount) {
+        c.section = kDumpColumns;
         return false;
       }
-      const gym::RepSegment& r = s_motion.seg[dumpIndex_];
+      const gym::RepSegment& r = s_motion.seg[c.index];
       snprintf(line, cap, "# segment=%u start=%u end=%u bottom=%u zenith=%u lift5=%u height_mm=%u valid=%u\n",
-               static_cast<unsigned>(dumpIndex_), r.start, r.end, r.bottom, r.zenith, r.lift5, r.heightMm,
+               static_cast<unsigned>(c.index), r.start, r.end, r.bottom, r.zenith, r.lift5, r.heightMm,
                r.valid ? 1 : 0);
-      dumpIndex_++;
+      c.index++;
       return true;
     }
     case kDumpColumns:
       // tx..tz: TMAG5273, lx..lz: LIS2MDL (0.1 uT); valid: bit 0 TMAG5273, bit 1 LIS2MDL
       snprintf(line, cap, "t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid\n");
-      dumpSection_ = kDumpRows;
-      dumpIndex_ = 0;
+      c.section = kDumpRows;
+      c.index = 0;
       return true;
     case kDumpRows: {
-      if (dumpIndex_ >= s_set.n) {
-        dumpSection_ = kDumpEnd;
+      if (c.index >= s_set.n) {
+        c.section = kDumpEnd;
         return false;
       }
-      const size_t i = dumpIndex_++;
+      const size_t i = c.index++;
       const int16_t* a = s_rec.acc(i);
       const int16_t* t = s_rec.mag(0, i);
       const int16_t* l = s_rec.mag(1, i);
@@ -715,7 +815,7 @@ bool WeightSensing::nextDumpLine(char* line, size_t cap) {
     }
     case kDumpEnd:
       snprintf(line, cap, "# end\n");
-      dumpSection_ = kDumpIdle;
+      c.section = kDumpIdle;
       return true;
     case kDumpIdle:
     default:
