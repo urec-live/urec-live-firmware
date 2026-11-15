@@ -72,8 +72,16 @@ void SetRecorder::add(uint32_t nowMs, const int16_t accMg[3], const int16_t b[][
   lastAddMs_ = nowMs;
 }
 
+// Counted reps may arrive late and out of order (the rep check counts the first two together):
+// keep them sorted by time.
 void SetRecorder::addCount(uint32_t nowMs) {
-  if (countAbs_ < kRecorderMaxCounts) s_countAbs[countAbs_++] = nowMs;
+  if (countAbs_ >= kRecorderMaxCounts) return;
+  size_t i = countAbs_++;
+  while (i > 0 && static_cast<int32_t>(s_countAbs[i - 1] - nowMs) > 0) {
+    s_countAbs[i] = s_countAbs[i - 1];
+    i--;
+  }
+  s_countAbs[i] = nowMs;
 }
 
 void SetRecorder::finish(uint32_t lastEventMs, gym::SetData* d) {
@@ -89,6 +97,7 @@ void SetRecorder::finish(uint32_t lastEventMs, gym::SetData* d) {
   const uint16_t span = n_ > 0 ? static_cast<uint16_t>(s_t[n_ - 1] - t0) : 0;
   for (size_t i = 0; i < n_; i++) s_t[i] = static_cast<uint16_t>(s_t[i] - t0);
   const uint32_t firstMs = lastAddMs_ - span;
+  firstMs_ = firstMs;
 
   countRel_ = 0;
   for (size_t k = 0; k < countAbs_; k++) {

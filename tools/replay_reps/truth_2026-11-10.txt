@@ -1,0 +1,15 @@
+# Gym test 2026-11-10 (lat pulldown), sets downloaded 2026-11-11 into sessions/2026-11-11_1413_sets.
+# <set number> <reps>. No rep notes were kept: these are read from the plots of each recording.
+# The recordings start at the first counted dip, so each line is the number of real rep tops
+# AFTER that first dip (the replay leaves the first dip unchecked, as the beacon counted it then).
+# Sets not listed are handling, bumps or unclear (the beacon loose or picked up); 214 and 216
+# (1 Hz moves of 5-12 cm) were confirmed not to be reps.
+201 6   # known: 6 cycles; setup at 0 s, release at 14.2 s
+202 10  # setup at 0 and 2.1 s (hold 2.2-3.5 s); reps 4.9-24.3 s
+208 4   # reps 2.9-12.3 s; release 14.5 s
+210 4   # C1 (5 planned): reps 2.7-13.0 s; the first dip is probably rep 1
+211 5   # X3, slow (8 planned): reps 1.9-11.6 s
+212 7   # reps 1.7-11.7, 18.9, 22.1 s; small moves 13.6 and 24.2 s; release 25.3 s
+213 5   # reps 3.0-11.1 s
+221 5   # reps 4.4-14.2 s; small move 16.1 s before the release
+222 4   # reps 4.0-12.7 s (the gateway also got 4)

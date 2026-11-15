@@ -31,6 +31,20 @@
 #define BEACON_HOLDOFF_MS 350
 #define BEACON_MIN_REP_INTERVAL_MS 600
 
+// ---- Rep check (lib/gym_core/src/rep_validator.h, walkthrough §3.7) ---------------------------
+// Stack mode only: a dip counts only if the stack went up and came back down by about as much as
+// the set's other reps. That drops the setup (lift and hold) and the release (letting go, standing
+// up). The first count shows at rep 2 (0 -> 2); from rep 3 on, each rep counts at its dip as before.
+// The console's `chk off` keeps counting every dip and only logs what the check would ignore.
+#define BEACON_REP_CHECK 1
+#define BEACON_REP_MIN_TRAVEL_MM 80     // a rep moves the stack at least this far up and back down
+#define BEACON_REP_MATCH_PCT 50         // ... and at least this % of the median travel of the set's reps
+#define BEACON_REP_START_MATCH_PCT 60   // the first two reps' returns agree this well
+#define BEACON_REP_TURN_MM 40           // smaller wiggles are not strokes
+#define BEACON_REP_TILT_DEG 35          // tilted further from rest: the beacon is being handled
+#define BEACON_WAKE_DELTA_MG 48         // a lift starting (|a| > rest + this for 2 samples) starts
+                                        // the sampler, so the check sees the stack leave rest
+
 // Paper: "accumulated until no new interrupt signal is received in five seconds and reset to zero".
 #define BEACON_SET_TIMEOUT_MS 5000
 #define BEACON_MAX_REPS_PER_SET 99

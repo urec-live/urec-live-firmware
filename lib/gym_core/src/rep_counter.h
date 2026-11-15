@@ -43,6 +43,12 @@ class RepCounter {
   // Re-arm-phase interrupt. Moves to Holdoff (or straight to Count when holdoffMs is 0).
   void onRearmEvent(uint32_t nowMs);
 
+  // A lift started while no set is active (LIS3DH "wake" interrupt): the session around the
+  // coming set starts now, so its samples begin at rest. Counts nothing and takes no set
+  // sequence; the first count event turns it into the set. A wake with no count event within
+  // setTimeoutMs expires quietly (poll() does not report it as a set end).
+  void onWake(uint32_t nowMs);
+
   // Advances timers. Returns true if the set ended on this call (reps are then 0, phase Count).
   bool poll(uint32_t nowMs);
 
@@ -56,12 +62,16 @@ class RepCounter {
   uint16_t reps() const { return reps_; }
   uint8_t setSeq() const { return setSeq_; }
   bool setActive() const { return setActive_; }
+  bool woken() const { return woken_; }                      // a wake waits for its first count
+  bool active() const { return setActive_ || woken_; }       // a session: woken, or a set
   uint32_t lastEventMs() const { return lastEventMs_; }
 
  private:
   RepCounterConfig cfg_;
   RepPhase phase_ = RepPhase::Count;
   bool setActive_ = false;
+  bool woken_ = false;
+  uint32_t wakeMs_ = 0;
   bool hasCounted_ = false;
   uint16_t reps_ = 0;
   uint8_t setSeq_ = 0;

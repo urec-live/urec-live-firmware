@@ -174,6 +174,43 @@ Every calibration first rewrites the LIS3DH's whole configuration (`Lis3dhMotion
 
 While no set is active, the beacon re-measures **every 30 s and after every set**. If it is still and the reading has moved more than 32 mg (it was bumped, or a zip tie slipped), it recalibrates. The limit is half the default 64 mg stack deltas. A larger tolerated drift would eat the count margin and could trigger phantom reps. If you lower `dl`/`dh` to 48, consider `BEACON_DRIFT_MG 24`. This is the fix for the paper's one failure.
 
+### 3.7 Checking each move is a rep
+
+Any downward acceleration is a dip, so the two-phase counter also counts moves that are not reps. At the first gym test (lat pulldown, 10 Nov) the extra counts came from two places:
+
+- **Setup:** standing to reach the bar, then sitting down with it, lifts the stack and holds it up. The stop at the top of that lift is a dip.
+- **Release:** after the last rep, letting go drops the stack (free fall reads ≈0 g, a deep dip), and standing up with the bar lowers it.
+
+So in stack mode the beacon now checks every dip against what the stack actually did. A dip counts only if it belongs to a **rep cycle**: the stack went **up, then came back down**, by an amount like the set's other reps. A setup is a rise with no return. A release is a descent with no rise.
+
+**Following the stack.** A second LIS3DH interrupt (§4) wakes the beacon when a lift starts: \|a\| > rest + 48 mg for 2 samples, armed only while no set is active. That starts a **session**, and with it the 50 Hz sampler, while the stack is still at rest. `gym::RepValidator` (`lib/gym_core/src/rep_validator.*`) then follows the stack's height from the samples:
+
+1. **Acceleration along gravity.** It projects each sample on the low-passed gravity direction and subtracts gravity: a = acc · û − g0. A tilted beacon works, and side-to-side rattle, which inflates \|a\|, does not bias it. The result is low-passed at 4 Hz.
+2. **Strokes.** A leaky velocity (τ = 1 s) gives the direction, up or down, and switches when it passes ±0.06 m/s. Each stroke (one direction) is integrated on its own, from v = 0 at its start, and de-drifted so that v = 0 at its end too. That cancels any constant accelerometer bias exactly, with no still moment needed in between: lat pulldown reps run back to back. (Integrating the whole set at once drifted by 2 m in 14 s on the gym data.)
+3. **Stops.** The leaky velocity turns a little before the stack does, so a stroke ends while the stack is still moving. If the signal goes quiet within 0.5 s of a stroke's end, the stack has stopped (a hold): its velocity is 0 from there for as long as the quiet lasts. That keeps a held setup from turning into a fake descent. A quiet stretch in the middle of a stroke is left alone: it may as well be a steady speed.
+4. **Turning points.** Summing the strokes gives the stack's height; peaks and valleys come from it with 40 mm of hysteresis, so wiggles smaller than that are not strokes.
+
+**Judging a dip.** Each dip the counter counts is a *move*:
+
+| The dip came… | Verdict |
+|---|---|
+| while the stack was going down (release, standing up) | `norise` |
+| while the beacon was tilted more than 35° from where it rests (picked up, flipped) | `tilted` |
+| during a lift, which then never came back down (setup) | `noreturn` |
+| during a lift that another, later dip in the same rise also belongs to (setup merging into rep 1) | `superseded`: the later one stays |
+| during a lift, up and back, but by less than 80 mm or less than 50 % of the median travel of the set's counted reps | `small` |
+| during a lift, up and back, big enough | counted |
+
+A move's size is min(rise, return): the rise from the valley before its peak, and the return to the valley after it.
+
+**When counts show.** Before the set has a template, the first cycle is **held** until a second one has come back down too, and their returns agree within 60 %. Then both count at once, and the display goes 0 → 2 as rep 3 starts. If they don't agree, the larger stays held and the other is `dropped`; a lone cycle at the set's end counts as 1, which the gateway already treats as a bump. From rep 3 on, a dip counts **at once** if the rise so far already reaches the template, so the count still moves at the top of each rep. The returns are compared, not the rises, because rep 1 often starts from the setup's hold, higher up than the later reps' bottoms.
+
+**When it cannot judge.** If a session starts at a dip instead of the wake (a lift too gentle to wake it), the first stroke's starting speed is unknown. That first dip then counts **unchecked**, as before, unless a later dip shares its peak. Recordings made before the wake existed (the 10 Nov gym sets) all start that way.
+
+**Modes.** Lever and paper mode are not checked: every dip counts, as before. `chk off` keeps the check running but counts every dip, logging `[move] would ignore: …` for what it would have dropped (§7). The settings are `BEACON_REP_*` and `BEACON_WAKE_DELTA_MG` in `beacon_config.h`; `travel` and `match` change the two thresholds live.
+
+**How it was tuned.** On the 50 sets downloaded after the 10 Nov gym test, nine clean lat pulldown sets have a clear truth from their plots. The check matches it on all nine: setup, release and fidget dips are dropped, and no real cycle is lost. The beacon counted 183 dips in those 50 sets; the check keeps 103. `tools/replay_reps/` replays any downloaded sets through the same C++ (§11). The 15 unit tests (§11) cover the cases the gym data can't, because those sets started mid-motion: anchored setups with holds from 0.5 to 4 s, partial reps at 55 %, pauses, bias, rocking ±17° and a flipped beacon.
+
 ---
 
 ## 4. The LIS3DH configuration, register by register
@@ -182,16 +219,16 @@ While no set is active, the beacon re-measures **every 30 s and after every set*
 
 | Register | Value | Bits | Meaning |
 |---|---|---|---|
-| `INT1_CFG` 0x30 | `0x00` | | interrupt off while reconfiguring |
+| `INT1_CFG` 0x30, `INT2_CFG` 0x34 | `0x00` | | interrupts off while reconfiguring |
 | `CTRL_REG1` 0x20 | `0x47` | ODR=0100, LPen=0, Z/Y/X on | 50 samples/s, normal 10-bit mode (≈11 µA). Weight sensing integrates the acceleration and needs the finer steps; for counting alone, low-power 8-bit mode (`0x4F`, ≈6 µA) would do |
 | `CTRL_REG2` 0x21 | `0x00` | HP filter bypassed | **keeps gravity in the signal**: that is the "direction" |
-| `CTRL_REG3` 0x22 | `0x40` | I1_IA1 | only interrupt-1 events drive the INT1 pin |
+| `CTRL_REG3` 0x22 | `0x60` | I1_IA1, I1_IA2 | interrupt-1 (count/re-arm) and interrupt-2 (the lift-start wake, §3.7) events both drive the INT1 pin |
 | `CTRL_REG4` 0x23 | `0x80` | BDU=1, FS=±2 g, HR=0 | 4 mg per data step in normal mode; the interrupt threshold still steps in 16 mg |
-| `CTRL_REG5` 0x24 | `0x08` | LIR_INT1 | **latched**: INT1 stays HIGH until `INT1_SRC` is read |
-| `CTRL_REG6` 0x25 | `0x00` | | INT1 active-high |
+| `CTRL_REG5` 0x24 | `0x0A` | LIR_INT1, LIR_INT2 | **latched**: each generator stays set until its `INTx_SRC` is read, and INT1 stays HIGH while either one is |
+| `CTRL_REG6` 0x25 | `0x00` | | INT1 active-high, nothing on the INT2 pin |
 | `TEMP_CFG` 0x1F | `0x00` | | ADC/temperature off |
-| `INT2_CFG`, `CLICK_CFG` | `0x00` | | nothing else can raise interrupts |
-| read `INT1_SRC` 0x31 | | | clears a latch left over from before a reset |
+| `CLICK_CFG` | `0x00` | | nothing else can raise interrupts |
+| read `INT1_SRC` 0x31, `INT2_SRC` 0x35 | | | clears latches left over from before a reset |
 
 Then, for each phase, `Lis3dhMotion::arm()` programs:
 
@@ -201,6 +238,8 @@ Then, for each phase, `Lis3dhMotion::arm()` programs:
 | `INT1_THS` 0x32 | round(threshold mg / 16) | 7 bits, 16 mg per step at ±2 g, max 2032 mg |
 | `INT1_DURATION` 0x33 | samples | the condition must hold this many samples (20 ms each at 50 Hz) |
 | `INT1_CFG` 0x30 | one enable bit | XLIE `0x01`, XHIE `0x02`, YLIE `0x04`, YHIE `0x08`, ZLIE `0x10`, ZHIE `0x20` ("L" = below threshold, "H" = above). AOI=0 and 6D=0: a plain threshold. |
+
+`Lis3dhMotion::armWake()` programs interrupt 2 the same way (`INT2_CFG` 0x34, `INT2_THS` 0x36, `INT2_DURATION` 0x37) for the wake: \|a\| > rest + 48 mg for 2 samples on the motion axis. It is armed only while no set is active, in stack mode; `disarmWake()` turns it off. When the pin rises, `serviceInterrupt()` reads both `INT1_SRC` and `INT2_SRC`.
 
 **Reading data:** `readSample()` reads 7 bytes in one burst starting at `STATUS_REG` 0x27. The register address is sent as `0xA7`; the top bit means "auto-increment". In normal mode each axis is a 10-bit value, left-justified in its low/high byte pair: `(int16)(L | H << 8) >> 6`, times 4 mg. With BDU=1 the outputs only update once both halves have been read. The burst never touches `REFERENCE` 0x26.
 
@@ -249,13 +288,16 @@ It then calls `xSemaphoreTake(sem, time until that deadline)`. While the loop ta
 
 ### 5.3 Handling an interrupt (`serviceInterrupt()`)
 
-1. **Read `INT1_SRC`.** This tells you which condition fired and also releases the latched INT1 pin. Nothing happens unless its IA bit is set and the axis/direction bit matches the phase that is armed.
-2. **Count phase:** call `RepCounter::onCountEvent(now)`. If it counts:
-   - it builds the iBeacon frame;
-   - it **starts a burst with the red LED on**; `loop()` stops the burst, and the LED, 150 ms later;
-   - it schedules the repeat burst 1.4 s later.
-3. **Re-arm phase:** call `RepCounter::onRearmEvent(now)`, which starts the hold-off.
-4. **`syncArm()`.**
+1. **Read `INT1_SRC` and `INT2_SRC`.** They tell you which condition fired and also release the latched INT1 pin. Nothing happens unless an IA bit is set and the axis/direction bit matches what is armed.
+2. **Wake (interrupt 2):** `RepCounter::onWake(now)` starts a session without counting or taking a set sequence. The rep check begins at rest, the sampler starts, and so does the recording (§3.7). A wake that no dip follows within 5 s expires quietly.
+3. **Count phase:** call `RepCounter::onCountEvent(now)`. If it counts the dip, the dip goes to the rep check (`RepValidator::onCandidate`). Whenever the check counts reps, now or later (from its 50 Hz samples), the beacon:
+   - builds the iBeacon frame with the checked count;
+   - **starts a burst with the red LED on**; `loop()` stops the burst, and the LED, 150 ms later;
+   - schedules the repeat burst 1.4 s later.
+
+   In lever and paper mode, and with `chk off`, the dip counts at once, as before.
+4. **Re-arm phase:** call `RepCounter::onRearmEvent(now)`, which starts the hold-off.
+5. **`syncArm()`**, which also arms or disarms the wake.
 
 ### 5.4 The re-arm invariant (`syncArm()`)
 
@@ -320,8 +362,9 @@ It is not an iBeacon, so phones and other iBeacon scanners never mistake it for 
 ### 5.6 Set end and the drift check
 
 `RepCounter::poll()` ends the set 5 s after the last motion event:
+- the rep check decides what is still open: a lone first cycle counts, a last lift that never came back down does not. A count decided only now is still broadcast;
 - reps go back to 0, as in the paper;
-- the monitor prints `[set] done: N reps`;
+- the monitor prints `[set] done: N reps`, or `[set] done: N reps (M moves ignored)`;
 - with a magnetometer fitted, the weight estimate follows ([weight-sensing.md](weight-sensing.md));
 - the drift check runs (§3.6).
 
@@ -361,8 +404,11 @@ The defaults are starting points: every machine and lifter is different. The bea
 | Command | Effect |
 |---|---|
 | `h` | help |
-| `s` | status: mode, axis, resting reading, both thresholds, phase, reps, set seq, INT1 pin level |
-| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:`, and with a magnetometer the field in µT: `>tx: >ty: >tz:` (TMAG5273), `>lx: >ly: >lz:` (LIS2MDL) |
+| `s` | status: mode, axis, resting reading, both thresholds, phase, reps, set seq, INT1 pin level, and the rep check's settings with what it ignored in the last set |
+| `st` | toggle streaming of Teleplot lines: `>a:` (\|a\| on the motion axis), `>cnt:` and `>rearm:` (thresholds), `>int:` (INT1 pin), `>reps:` (dips counted), during a session the rep check's `>pos:` (stack height, mm), `>vel:` (leaky velocity, m/s) and `>counted:`, and with a magnetometer the field in µT: `>tx: >ty: >tz:` (TMAG5273), `>lx: >ly: >lz:` (LIS2MDL) |
+| `chk on\|off` | the rep check (§3.7). `off` counts every dip, as before, and logs `[move] would ignore: …` for what the check would drop. It takes effect from the next set |
+| `travel <mm>` | rep check: smallest travel up and back (default 80) |
+| `match <pct>` | rep check: % of the median travel of the set's counted reps a rep must reach (default 50) |
 | `mode stack\|paper\|lever` | load that mode's preset, then recalibrate |
 | `dl <mg>` / `dh <mg>` | count / re-arm delta |
 | `durl <n>` / `durh <n>` | count / re-arm duration in samples (20 ms each) |
@@ -398,14 +444,29 @@ What to know:
 2. In the PlatformIO monitor type `st`, then **close the monitor**. Only one program can open the port at a time, and streaming stays on in the firmware.
 3. In Teleplot, connect to the Feather's COM port at 115200.
 
-You'll see `a` move around `rest`, the two threshold lines, `int` pulse when an interrupt fires, and `reps` step up. To type commands again, disconnect Teleplot and reopen the monitor.
+You'll see `a` move around `rest`, the two threshold lines, `int` pulse when an interrupt fires, and `reps` step up. During a session `pos` draws the stack's height as the rep check sees it: one up-and-back per rep. To type commands again, disconnect Teleplot and reopen the monitor.
+
+### The rep check's lines
+
+Each move the check drops prints one line once it is decided, on USB and on the phone:
+
+```
+[rep] 2  (set seq 143; reps 1-2 counted together once they matched)
+[rep] 3  (set seq 143)
+...
+[move] ignored: no rise (the stack was going down) (up 0 mm, back ? mm)
+[set] done: 10 reps (2 moves ignored)
+```
+
+The other reasons are `no return` (setup), `too small`, `part of the next lift`, `did not match the next rep` and `beacon tilted 62 deg`. Up and back are the rise and return in mm, `?` when unknown.
 
 ### Procedure
 
 1. **Bench:**
    1. Lay the breadboard flat, then `s`: it should say `axis auto -> z`, rest ≈ 1000 mg.
    2. Lift it ~30 cm, pause, and lower it; repeat with and without pauses.
-   3. Each cycle should add exactly one rep.
+   3. Each cycle should add exactly one rep. The first count shows at the second cycle (0 → 2, §3.7).
+   4. Rep check: lift and hold for 3 s, then lower it slowly → `[move] ignored: no return`. From a few cm, let it drop onto something soft → `no rise`. Turn it upside down → `beacon tilted`.
 2. **Mount on the machine:**
    1. Fix the breadboard rigidly to the top plate / selector stem. Zip ties around a 3D-printed or wooden carrier work; tape alone is not enough.
    2. Strain-relieve the LiPo and the jumpers.
@@ -639,7 +700,7 @@ Use VS Code's PlatformIO sidebar (*Project Tasks → beacon / gateway → Upload
 | Upload | `pio run -e beacon -t upload` | `pio run -e gateway -t upload` |
 | Monitor | `pio device monitor -e beacon` | `pio device monitor -e gateway` |
 | If upload fails | double-click the Feather's reset button. The red LED pulses and a `FTHR840BOOT` drive appears; upload again | install the Silicon Labs **CP210x** driver; or hold **BOOT**, tap **RESET**, release BOOT |
-| Size today | 114.6 KB RAM, 169 KB flash (99 KB of the RAM is weight sensing, [weight-sensing.md](weight-sensing.md) §6.4) | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
+| Size today | 122.6 KB RAM, 210 KB flash (99 KB of the RAM is weight sensing, [weight-sensing.md](weight-sensing.md) §6.4; about 7 KB is the rep check) | 33 KB RAM, 1.01 MB flash (3 MB app partition, `huge_app.csv`) |
 
 With both boards plugged in, `pio device list` shows the ports. Un-comment `upload_port`/`monitor_port` in `platformio.ini` if auto-detect picks the wrong board. The environment names changed from `adafruit_feather_nrf52840` to `beacon`/`gateway`. Your old `.pio/…/adafruit_feather_nrf52840` folders can be deleted, and VS Code regenerates `launch.json` itself.
 
@@ -653,11 +714,13 @@ mode stack, axis auto -> z, rest 1008 mg (x 16, y -32, z 1008)
   rearm: |a| > 1072 mg for 2 samples (40 ms)
   hold-off 350 ms, min rep interval 600 ms, set timeout 5000 ms
 phase count, reps 0, set idle (seq 142), INT1 pin 0
+rep check: on, travel >= 80 mm and >= 50 % of the set's reps, wake at rest + 48 mg
 weight: TMAG5273 at 0x35, 0 weights taught (0 reps); LIS2MDL at 0x1E, 0 weights taught (0 reps)
-[rep] 1  (set seq 143)
-[rep] 2  (set seq 143)
+[rep] 2  (set seq 143; reps 1-2 counted together once they matched)
+[rep] 3  (set seq 143)
 ...
-[set] done: 10 reps
+[move] ignored: no rise (the stack was going down) (up 0 mm, back ? mm)
+[set] done: 10 reps (1 moves ignored)
 ```
 
 **Expected gateway output:**
@@ -684,7 +747,17 @@ GetMeFit gateway gw-01 (boot 3fa2c1d0)
 
 ### Unit tests
 
-`test/test_gym_core/` holds 50 Unity tests for the packet format, the rep counter, the tracker and the weight sensing ([weight-sensing.md](weight-sensing.md) §11). The rep-counting tests cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, set amend after a late packet, bumps not recorded, and the full set ring.
+`test/test_gym_core/` holds 78 Unity tests for the packet format, the rep counter, the rep check, the tracker, the weight sensing ([weight-sensing.md](weight-sensing.md) §11) and the set store. The rep-counting tests cover the tricky cases: pause at the top, bounce during the hold-off, slow tempo, max reps, `millis()` wrap-around, the wake, set amend after a late packet, bumps not recorded, and the full set ring.
+
+The rep check's tests drive the real `RepCounter` and `RepValidator` with synthetic sets. A scripted stack height (moves, holds, a free-fall drop) becomes what the LIS3DH reads: gravity plus the stack's acceleration along a tilted, rocking or flipped beacon, 3 mg of noise, 4 mg steps and ±2 g clipping. An emulated comparator stands in for the count, re-arm and wake interrupts. The scenarios: 8 reps from rest; lat pulldown with setup, hold, 10 reps and a let-go or a stand-up; setup merged into rep 1; a 12 cm fidget; partial reps at 55 %; 3 cm knocks; a 3.5 s pause at the bottom; the wake missed; a single cycle; the 0 → 2 → 3 timing; 5 mg of bias; ±17° rocking; a flipped beacon.
+
+**Replaying recorded sets.** `tools/replay_reps/run_replay.cmd` builds `replay_reps.cpp` with MSVC (VS 2022 Build Tools) and runs downloaded set CSVs through the same `RepValidator`. It prints, per set, the dips counted then, the count now and each dip's verdict; with `--truth` it also prints the error:
+
+```
+tools\replay_reps\run_replay.cmd sessions\2026-11-11_1413_sets --truth=tools\replay_reps\truth_2026-11-10.txt
+```
+
+`tools/replay_reps/rep_validator_proto.py` is the Python prototype the check was first tuned with (plots with `--plot=<dir>`). The C++ has since gained the stop rule (§3.7, step 3).
 
 Run them on a plugged-in board:
 
@@ -728,6 +801,9 @@ The paper did 3 sets of 10 reps on leg curl, leg extension and lat pulldown. It 
 | Reps count only while plugged into USB | Check the battery is charged and plugged into the JST socket. The beacon never waits for USB. |
 | Double counts | Raise `dl`/`durl`/`hold` (§7). Make the mount rigid: a wobbling breadboard adds its own bumps. |
 | Missed reps | Lower `dl`/`dh`. Check that `s` shows the axis you expect. |
+| The count stays at 0 for the first rep | Expected: reps 1 and 2 count together once rep 2 is back down (§3.7). |
+| `[move] ignored: …` for a real rep | `too small`: lower `match` or `travel`. `beacon tilted`: make the mount rigid. To compare, do one set with `chk off`: it counts every dip and logs what the check would drop. |
+| A setup or a let-go still counts | Look at its `[move]` line, or `s` after the set. With `st` on, `pos` should show one up-and-back per rep. |
 | Gateway sees nothing | Check `[ble]` lines and that the beacon is in `kMachines[]`. A phone with **nRF Connect** should show the iBeacon; if it doesn't, the beacon isn't advertising. |
 | Gateway sees the beacon, Firebase stays empty | Look for `[firebase] … -> 401` (rules or UID) or `sign-in failed` (API key, email/password provider not enabled). Use the exact region URL. |
 | `[urec] LC001: HTTP 500` at boot | That machine code doesn't exist in that backend. Fix `kMachines[]`. |

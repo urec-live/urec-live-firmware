@@ -17,6 +17,7 @@
 #include <Wire.h>
 
 #include "lis3dh_motion.h"
+#include "rep_validator.h"
 #include "weight_settings.h"
 
 class WeightSensing {
@@ -29,22 +30,28 @@ class WeightSensing {
   // While no set is active: looks again for a magnetometer that did not answer (every 30 s).
   void housekeeping(uint32_t now);
 
-  // The 50 Hz sampler runs while a set is recorded or the Teleplot stream is on.
+  // The 50 Hz sampler runs while a set is recorded, the Teleplot stream is on, or the rep check
+  // follows the stack (motion sampling: the accelerometer only, magnetometer or not).
   bool sampling() const { return samplerOn_; }
   uint32_t nextSampleMs() const { return nextSampleMs_; }
   bool tick(uint32_t now);  // takes a sample when one is due; true if it did
   void setStreaming(bool on, uint32_t now);
+  void setMotionSampling(bool on, uint32_t now);
   const int16_t* latestAccMg() const { return latestAcc_; }
   void printStreamFields() const;  // Teleplot lines for the latest field sample(s)
 
-  // Set lifecycle, driven by main.cpp from the rep counter. `blocked` is why this set must not be
-  // weighed (lever mode), or nullptr.
+  // Set lifecycle, driven by main.cpp from the rep counter: the recording runs from the lift-start
+  // wake (or the first dip) to the set's end. `blocked` is why this set must not be weighed (lever
+  // mode), or nullptr. onCount: a counted rep, at its dip's time (it may be counted later).
   bool inSet() const { return inSet_; }
   void startSet(uint32_t now, const char* blocked);
-  void onCount(uint32_t now);
+  void onCount(uint32_t dipMs);
+  // The rep check's view of the set, for its CSV: the resting reading it started from, whether
+  // the wake started it, and every dip with its verdict. Call before finishSet().
+  void setMoves(const int16_t restMg[3], bool wake, const gym::RepValidator& v);
   void finishSet(uint32_t now, uint32_t lastEventMs, uint8_t setSeq, uint16_t countedReps,
                  uint16_t minRepIntervalMs);
-  void abortSet(uint32_t now);
+  void abortSet(uint32_t now, bool quiet = false);  // quiet: a wake with no rep, nothing to say
 
   // Console. fromPhone: the command came from the Bluetooth console, which may not erase the
   // stored sets or start a download (both are USB-only).
@@ -56,7 +63,8 @@ class WeightSensing {
 
  private:
   enum DumpSection : uint8_t { kDumpIdle, kDumpSummary, kDumpError, kDumpRest, kDumpMagRest, kDumpCounts,
-                               kDumpValleys, kDumpSegments, kDumpColumns, kDumpRows, kDumpEnd };
+                               kDumpCal, kDumpMoves, kDumpValleys, kDumpSegments, kDumpColumns, kDumpRows,
+                               kDumpEnd };
   struct DumpCursor {
     DumpSection section = kDumpIdle;
     size_t index = 0;
@@ -84,6 +92,7 @@ class WeightSensing {
   bool inSet_ = false;
   bool recording_ = false;
   bool streaming_ = false;
+  bool motionSampling_ = false;
   bool samplerOn_ = false;
   bool magInSet_ = false;  // a magnetometer was there when the set started
   const char* blocked_ = nullptr;

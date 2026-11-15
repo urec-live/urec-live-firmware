@@ -23,6 +23,7 @@ bool RepCounter::onCountEvent(uint32_t nowMs) {
   }
   if (!setActive_) {
     setActive_ = true;
+    woken_ = false;  // the wake's session becomes this set
     reps_ = 0;
     setSeq_ = nextSetSeq(setSeq_);
   }
@@ -45,10 +46,17 @@ void RepCounter::onRearmEvent(uint32_t nowMs) {
   }
 }
 
+void RepCounter::onWake(uint32_t nowMs) {
+  if (setActive_ || woken_) return;
+  woken_ = true;
+  wakeMs_ = nowMs;
+}
+
 bool RepCounter::poll(uint32_t nowMs) {
   if (phase_ == RepPhase::Holdoff && elapsed(nowMs, holdoffStartMs_, cfg_.holdoffMs)) {
     phase_ = RepPhase::Count;
   }
+  if (woken_ && elapsed(nowMs, wakeMs_, cfg_.setTimeoutMs)) woken_ = false;  // no count followed
   if (setActive_ && elapsed(nowMs, lastEventMs_, cfg_.setTimeoutMs)) {
     endSet();
     return true;
@@ -63,8 +71,8 @@ bool RepCounter::nextDeadline(uint32_t* deadlineMs) const {
     best = holdoffStartMs_ + cfg_.holdoffMs;
     any = true;
   }
-  if (setActive_) {
-    const uint32_t t = lastEventMs_ + cfg_.setTimeoutMs;
+  if (setActive_ || woken_) {
+    const uint32_t t = (setActive_ ? lastEventMs_ : wakeMs_) + cfg_.setTimeoutMs;
     // Compare relative to the last event so the choice survives millis() wrap-around.
     if (!any || static_cast<int32_t>(t - best) < 0) best = t;
     any = true;
@@ -74,6 +82,7 @@ bool RepCounter::nextDeadline(uint32_t* deadlineMs) const {
 }
 
 void RepCounter::endSet() {
+  woken_ = false;
   if (!setActive_) return;
   setActive_ = false;
   hasCounted_ = false;

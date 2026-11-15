@@ -1,4 +1,5 @@
-// Minimal LIS3DH driver for rep detection: inertial interrupt 1 on the INT1 pin plus raw reads.
+// Minimal LIS3DH driver for rep detection: inertial interrupts 1 (the rep counter's count/re-arm
+// events) and 2 (the lift-start wake), both on the INT1 pin, plus raw reads.
 //
 // We do not use Adafruit_LIS3DH::begin(): it routes data-ready to INT1, enables high-resolution
 // mode (not allowed together with low-power mode) and turns on the ADC. Register values are from
@@ -20,7 +21,8 @@ class Lis3dhMotion {
   // Checks WHO_AM_I and writes the base configuration. Returns false if no LIS3DH answers.
   bool begin(TwoWire& wire, uint8_t address);
 
-  // 50 Hz, normal mode (10-bit, 4 mg), +/-2 g, BDU, HP filter off, IA1 -> INT1 latched, IA1 disabled.
+  // 50 Hz, normal mode (10-bit, 4 mg), +/-2 g, BDU, HP filter off, IA1 and IA2 -> INT1 latched,
+  // both disabled.
   void configureBase();
 
   // Arms interrupt 1 for |a_axis| > thresholdMg (high) or < thresholdMg (!high), held for
@@ -30,6 +32,12 @@ class Lis3dhMotion {
 
   // Reading INT1_SRC returns which condition fired (IA set) and clears the latched INT1 pin.
   uint8_t readInt1Source();
+
+  // Interrupt 2, the same way (it shares the INT1 pin): the wake on a lift starting. The pin stays
+  // high while either generator is latched, so read both sources when it rises.
+  void armWake(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration);
+  void disarmWake();
+  uint8_t readInt2Source();
 
   // Burst read of STATUS_REG + OUT_X/Y/Z (L and H, as BDU requires). `fresh` = new XYZ data.
   bool readSample(Sample* s, bool* fresh);

@@ -25,6 +25,9 @@ struct MotionSettings {
   uint8_t rearmDuration;      // samples the re-arm condition must hold
   uint32_t holdoffMs;         // quiet time after the re-arm event
   uint32_t minRepIntervalMs;  // count events closer than this to the last rep are ignored
+  bool repCheck;              // stack mode: count a dip only if it is a rep cycle (off: log only)
+  uint16_t repMinTravelMm;    // rep check: smallest travel up and back
+  uint8_t repMatchPct;        // rep check: % of the median travel of the set's reps
 };
 
 // Result of measuring the beacon at rest.

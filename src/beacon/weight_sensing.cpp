@@ -87,6 +87,18 @@ uint8_t s_latestValid = 0;
 SetStore s_store;  // every recorded set, in the QSPI flash (set_store.h)
 const uint16_t kPhoneListRows = 10;  // `sets` on the phone: the newest ones only
 
+// The rep check's view of the recorded set (its "# cal=" and "# moves=" dump lines).
+struct MoveRow {
+  uint32_t dipMs;  // millis()
+  gym::MoveVerdict verdict;
+  int16_t riseMm, returnMm;
+};
+MoveRow s_moves[gym::RepValidator::kMaxMoves];
+size_t s_moveN = 0;
+bool s_haveCheck = false;  // the set had the rep check's data (stack mode)
+int16_t s_checkRest[3] = {0, 0, 0};
+bool s_checkWake = false;
+
 bool elapsed(uint32_t now, uint32_t start, uint32_t duration) { return now - start >= duration; }
 
 // Labels are tenths of the unit: 500 -> "50", 125 -> "12.5".
@@ -271,7 +283,7 @@ void WeightSensing::updatePower(uint32_t now) {
     }
   }
   if (recording_ && !anyPresent()) recording_ = false;  // nothing left to weigh this set with
-  const bool sample = recording_ || streaming_;
+  const bool sample = recording_ || streaming_ || motionSampling_;
   if (sample && !samplerOn_) nextSampleMs_ = now;
   samplerOn_ = sample;
 }
@@ -279,6 +291,12 @@ void WeightSensing::updatePower(uint32_t now) {
 void WeightSensing::setStreaming(bool on, uint32_t now) {
   if (on == streaming_) return;
   streaming_ = on;
+  updatePower(now);
+}
+
+void WeightSensing::setMotionSampling(bool on, uint32_t now) {
+  if (on == motionSampling_) return;
+  motionSampling_ = on;
   updatePower(now);
 }
 
@@ -350,19 +368,32 @@ void WeightSensing::startSet(uint32_t now, const char* blocked) {
     s_rec.clear(now);
     rawValid_ = false;  // the last set's samples are being overwritten
     recordStartMs_ = now;
+    s_haveCheck = false;
   }
   updatePower(now);
 }
 
-void WeightSensing::onCount(uint32_t now) {
-  if (recording_) s_rec.addCount(now);
+void WeightSensing::onCount(uint32_t dipMs) {
+  if (recording_) s_rec.addCount(dipMs);
 }
 
-void WeightSensing::abortSet(uint32_t now) {
+void WeightSensing::setMoves(const int16_t restMg[3], bool wake, const gym::RepValidator& v) {
+  if (!recording_) return;
+  memcpy(s_checkRest, restMg, sizeof(s_checkRest));
+  s_checkWake = wake;
+  s_moveN = 0;
+  for (size_t i = 0; i < v.moveCount() && s_moveN < gym::RepValidator::kMaxMoves; i++) {
+    const gym::MoveInfo m = v.move(i);
+    s_moves[s_moveN++] = {m.dipMs, m.verdict, m.riseMm, m.returnMm};
+  }
+  s_haveCheck = true;
+}
+
+void WeightSensing::abortSet(uint32_t now, bool quiet) {
   if (!inSet_) return;
   inSet_ = false;
   for (uint8_t k = 0; k < kMaxMagnetometers; k++) s_slot[k].featN = 0;  // `teach` must not label an earlier set
-  if (recording_) LOG("[weight] set aborted (cal / reset / mode change): not weighed\n");
+  if (recording_ && !quiet) LOG("[weight] set aborted (cal / reset / mode change): not weighed\n");
   recording_ = false;
   updatePower(now);
 }
@@ -406,8 +437,17 @@ void WeightSensing::finishSet(uint32_t now, uint32_t lastEventMs, uint8_t setSeq
   cfg.stillP2pMg = BEACON_STILL_P2P_MG;
   cfg.lowPassHz = kSegmentLowPassHz;
   motionError_ = nullptr;
-  const bool moved = gym::analyzeMotion(s_set, cfg, s_aUp, s_x, &s_motion);
-  if (!moved) motionError_ = s_motion.error;
+  bool moved = false;
+  if (countedReps == 0) {  // every move was ignored: kept in the store, but there is nothing to weigh
+    s_motion.restEnd = 0;
+    s_motion.valleyCount = s_motion.segCount = s_motion.validCount = 0;
+    s_motion.minRepMsUsed = 0;
+    s_motion.adapted = false;
+    motionError_ = "no rep counted (the rep check ignored every move)";
+  } else {
+    moved = gym::analyzeMotion(s_set, cfg, s_aUp, s_x, &s_motion);
+    if (!moved) motionError_ = s_motion.error;
+  }
   for (uint8_t k = 0; k < kMaxMagnetometers && moved; k++) {
     MagSlot& s = s_slot[k];
     if (!s.inSet || s.lost) continue;
@@ -770,7 +810,7 @@ bool WeightSensing::nextDumpLine(DumpCursor& c, char* line, size_t cap) const {
       const bool counts = c.section == kDumpCounts;
       const size_t total = counts ? s_set.countN : s_motion.valleyCount;
       if (c.index >= total) {
-        c.section = counts ? kDumpValleys : kDumpSegments;
+        c.section = counts ? kDumpCal : kDumpSegments;
         c.index = 0;
         return false;
       }
@@ -778,6 +818,33 @@ bool WeightSensing::nextDumpLine(DumpCursor& c, char* line, size_t cap) const {
       for (size_t k = 0; k < kPerLine && c.index < total && len + 8 < cap; k++, c.index++) {
         const unsigned v = counts ? s_set.countMs[c.index] : s_motion.valleys[c.index];
         len += snprintf(line + len, cap - len, k == 0 ? "%u" : ",%u", v);
+      }
+      snprintf(line + len, cap - len, "\n");
+      return true;
+    }
+    case kDumpCal:  // the rep check's starting point: rest reading, and whether the wake started it
+      c.section = kDumpMoves;
+      c.index = 0;
+      if (!s_haveCheck) return false;
+      snprintf(line, cap, "# cal=%d,%d,%d wake=%u\n", s_checkRest[0], s_checkRest[1], s_checkRest[2],
+               s_checkWake ? 1u : 0u);
+      return true;
+    case kDumpMoves: {  // every dip: time:verdict:rise:return (mm, ? = unknown); counts_ms has the counted ones
+      if (!s_haveCheck || c.index >= s_moveN) {
+        c.section = kDumpValleys;
+        c.index = 0;
+        return false;
+      }
+      size_t len = snprintf(line, cap, "# moves=");
+      for (size_t k = 0; k < 3 && c.index < s_moveN && len + 40 < cap; k++, c.index++) {
+        const MoveRow& m = s_moves[c.index];
+        int32_t t = s_rec.relMs(m.dipMs);
+        if (t < 0) t = 0;
+        char rise[8], ret[8];
+        if (m.riseMm == gym::RepValidator::kUnknownMm) strcpy(rise, "?"); else snprintf(rise, sizeof(rise), "%d", m.riseMm);
+        if (m.returnMm == gym::RepValidator::kUnknownMm) strcpy(ret, "?"); else snprintf(ret, sizeof(ret), "%d", m.returnMm);
+        len += snprintf(line + len, cap - len, "%s%ld:%s:%s:%s", k == 0 ? "" : ",", static_cast<long>(t),
+                        gym::moveVerdictName(m.verdict), rise, ret);
       }
       snprintf(line + len, cap - len, "\n");
       return true;

@@ -16,6 +16,9 @@ const uint8_t kInt1Src = 0x31;
 const uint8_t kInt1Ths = 0x32;
 const uint8_t kInt1Dur = 0x33;
 const uint8_t kInt2Cfg = 0x34;
+const uint8_t kInt2Src = 0x35;
+const uint8_t kInt2Ths = 0x36;
+const uint8_t kInt2Dur = 0x37;
 const uint8_t kClickCfg = 0x38;
 const uint8_t kAutoIncrement = 0x80;  // MSB of the sub-address enables multi-byte reads
 
@@ -34,18 +37,22 @@ bool Lis3dhMotion::begin(TwoWire& wire, uint8_t address) {
 
 void Lis3dhMotion::configureBase() {
   write(kInt1Cfg, 0x00);  // no interrupt while reconfiguring
+  write(kInt2Cfg, 0x00);
   write(kCtrl1, 0x47);    // ODR 50 Hz (0100), LPen=0 (normal 10-bit mode), Z/Y/X enabled
   write(kCtrl2, 0x00);    // HP filter bypassed: gravity stays in the signal (the "direction")
-  write(kCtrl3, 0x40);    // I1_IA1 only (clears the data-ready routing Adafruit's begin() sets)
+  write(kCtrl3, 0x60);    // I1_IA1 + I1_IA2: both generators on the INT1 pin (no data-ready routing,
+                          // which Adafruit's begin() sets)
   write(kCtrl4, 0x80);    // BDU=1, FS=+/-2 g, HR=0 (normal mode, not high-resolution)
-  write(kCtrl5, 0x08);    // LIR_INT1: INT1 stays high until INT1_SRC is read
-  write(kCtrl6, 0x00);    // active-high, nothing on INT2
+  write(kCtrl5, 0x0A);    // LIR_INT1 + LIR_INT2: each stays latched until its *_SRC is read
+  write(kCtrl6, 0x00);    // active-high, nothing on the INT2 pin
   write(kTempCfg, 0x00);  // ADC/temperature off
-  write(kInt2Cfg, 0x00);
   write(kClickCfg, 0x00);
   write(kInt1Ths, 0x00);
   write(kInt1Dur, 0x00);
+  write(kInt2Ths, 0x00);
+  write(kInt2Dur, 0x00);
   (void)read(kInt1Src);   // drop any latched event left over from before an MCU reset
+  (void)read(kInt2Src);
   delay(25);              // turn-on: let the first normal-mode sample (20 ms at 50 Hz) arrive
 }
 
@@ -63,6 +70,21 @@ void Lis3dhMotion::arm(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t du
 void Lis3dhMotion::disarm() { write(kInt1Cfg, 0x00); }
 
 uint8_t Lis3dhMotion::readInt1Source() { return read(kInt1Src); }
+
+void Lis3dhMotion::armWake(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration) {
+  uint16_t ths = static_cast<uint16_t>((thresholdMg + kThsLsbMg / 2) / kThsLsbMg);
+  if (ths < 1) ths = 1;
+  if (ths > 127) ths = 127;
+  if (duration > 127) duration = 127;
+  write(kInt2Cfg, 0x00);
+  write(kInt2Ths, static_cast<uint8_t>(ths));
+  write(kInt2Dur, duration);
+  write(kInt2Cfg, eventBit(axis, high));
+}
+
+void Lis3dhMotion::disarmWake() { write(kInt2Cfg, 0x00); }
+
+uint8_t Lis3dhMotion::readInt2Source() { return read(kInt2Src); }
 
 bool Lis3dhMotion::readSample(Sample* s, bool* fresh) {
   uint8_t buf[7];

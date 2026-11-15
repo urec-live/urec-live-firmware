@@ -30,6 +30,9 @@ MotionSettings settingsFromConfig() {
   s.rearmDuration = BEACON_REARM_DURATION;
   s.holdoffMs = BEACON_HOLDOFF_MS;
   s.minRepIntervalMs = BEACON_MIN_REP_INTERVAL_MS;
+  s.repCheck = BEACON_REP_CHECK != 0;
+  s.repMinTravelMm = BEACON_REP_MIN_TRAVEL_MM;
+  s.repMatchPct = BEACON_REP_MATCH_PCT;
   return s;
 }
 
@@ -38,6 +41,9 @@ MotionSettings presetFor(MotionMode mode, uint8_t axis) {
   s.mode = mode;
   s.axis = axis;
   s.minRepIntervalMs = 600;
+  s.repCheck = BEACON_REP_CHECK != 0;  // only used in stack mode
+  s.repMinTravelMm = BEACON_REP_MIN_TRAVEL_MM;
+  s.repMatchPct = BEACON_REP_MATCH_PCT;
   switch (mode) {
     case MotionMode::Paper:
       s.countDeltaMg = 64;

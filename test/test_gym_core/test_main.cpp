@@ -1,8 +1,11 @@
-// On-device unit tests for lib/gym_core (protocol and status frame, rep counter, machine tracker, weight pipeline
-// and weight model). Run on either board:  pio test -e gateway   (or -e beacon). This replaces the
-// firmware on the board; upload the normal firmware again afterwards.
+// On-device unit tests for lib/gym_core (protocol and status frame, rep counter, rep validator,
+// machine tracker, weight pipeline and weight model, set store format). Run on either board:
+// pio test -e gateway   (or -e beacon). This replaces the firmware on the board; upload the normal
+// firmware again afterwards. On the PC: w8-progress/hosttest/run_host_tests.cmd (MSVC).
 #include <Arduino.h>
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unity.h>
 #if defined(ARDUINO_ARCH_NRF52)
 #include <Adafruit_TinyUSB.h>  // Feather: Serial is USB; this lets PlatformIO find the library
@@ -11,6 +14,7 @@
 #include "gym_protocol.h"
 #include "machine_tracker.h"
 #include "rep_counter.h"
+#include "rep_validator.h"
 #include "set_store_format.h"
 #include "weight_model.h"
 #include "weight_pipeline.h"
@@ -312,6 +316,54 @@ void test_counter_millis_wrap() {
   TEST_ASSERT_TRUE(rc.onCountEvent(t0));
   TEST_ASSERT_FALSE(rc.poll(t0 + 4999));  // wraps past 0
   TEST_ASSERT_TRUE(rc.poll(t0 + 5000));
+}
+
+void test_counter_wake_becomes_the_set() {
+  RepCounter rc(repCfg());
+  rc.seedSetSeq(10);
+  rc.onWake(1000);
+  TEST_ASSERT_TRUE(rc.active());
+  TEST_ASSERT_TRUE(rc.woken());
+  TEST_ASSERT_FALSE(rc.setActive());
+  TEST_ASSERT_EQUAL_UINT16(0, rc.reps());
+  TEST_ASSERT_EQUAL_UINT8(10, rc.setSeq());  // no sequence taken yet
+  uint32_t deadline = 0;
+  TEST_ASSERT_TRUE(rc.nextDeadline(&deadline));
+  TEST_ASSERT_EQUAL_UINT32(6000, deadline);
+  TEST_ASSERT_FALSE(rc.poll(2000));
+  TEST_ASSERT_TRUE(rc.onCountEvent(2500));
+  TEST_ASSERT_TRUE(rc.setActive());
+  TEST_ASSERT_FALSE(rc.woken());
+  TEST_ASSERT_EQUAL_UINT8(11, rc.setSeq());
+  TEST_ASSERT_FALSE(rc.poll(6000));  // the set's own timer now: 5 s after the count
+  TEST_ASSERT_TRUE(rc.poll(7500));
+  TEST_ASSERT_FALSE(rc.active());
+}
+
+void test_counter_wake_expires_quietly() {
+  RepCounter rc(repCfg());
+  rc.seedSetSeq(10);
+  rc.onWake(1000);
+  TEST_ASSERT_FALSE(rc.poll(5999));
+  TEST_ASSERT_TRUE(rc.active());
+  TEST_ASSERT_FALSE(rc.poll(6000));  // not a set end
+  TEST_ASSERT_FALSE(rc.active());
+  TEST_ASSERT_FALSE(rc.nextDeadline(nullptr));
+  TEST_ASSERT_TRUE(rc.onCountEvent(7000));  // a later dip starts a set as before
+  TEST_ASSERT_EQUAL_UINT8(11, rc.setSeq());
+  TEST_ASSERT_EQUAL_UINT16(1, rc.reps());
+}
+
+void test_counter_wake_ignored_during_set() {
+  RepCounter rc(repCfg());
+  TEST_ASSERT_TRUE(rc.onCountEvent(1000));
+  rc.onWake(1500);
+  TEST_ASSERT_FALSE(rc.woken());
+  rc.endSet();
+  rc.onWake(2000);
+  TEST_ASSERT_TRUE(rc.woken());
+  rc.endSet();  // cal / reset also drop a pending wake
+  TEST_ASSERT_FALSE(rc.active());
 }
 
 // ---------------------------------------------------------------- machine tracker
@@ -1169,8 +1221,361 @@ void test_store_record_size_and_rows() {
   TEST_ASSERT_EQUAL_UINT8(3, out.valid);
 }
 
+// ---------------------------------------------------------------- rep validator
+//
+// A scripted stack position (raised-cosine moves, holds, a free-fall drop) becomes what the LIS3DH
+// on the stack reads: gravity plus the stack's acceleration along a tilted/rocking/flipped beacon,
+// 3 mg noise, 4 mg steps and +/-2 g clipping, at 50 Hz. An emulated LIS3DH comparator on z (count:
+// |a| < rest - 64 mg for 4 samples, re-arm: > rest + 64 mg for 2, wake: > rest + 48 mg for 2)
+// drives the real RepCounter and RepValidator the way main.cpp does.
+
+struct StackStep {
+  float durS;
+  float toMm;
+  bool drop;  // free fall to toMm, then the landing
+};
+
+struct StackScript {
+  StackStep step[32];  // on the loop task's 4 KB stack: keep it small
+  int n = 0;
+  float endMm = 0.0f;
+  StackScript& move(float toMm, float durS) {
+    if (n < 32) step[n++] = {durS, toMm, false};
+    endMm = toMm;
+    return *this;
+  }
+  StackScript& hold(float durS) { return move(endMm, durS); }
+  StackScript& drop(float toMm) {
+    if (n < 32) step[n++] = {sqrtf(2.0f * (endMm - toMm) / 9806.65f), toMm, true};
+    endMm = toMm;
+    return *this;
+  }
+  // n cycles from the current height: up by heightMm in upS, back down in downS.
+  StackScript& reps(int count, float heightMm, float upS = 1.0f, float downS = 1.2f) {
+    const float base = endMm;
+    for (int k = 0; k < count; k++) move(base + heightMm, upS).move(base, downS);
+    return *this;
+  }
+};
+
+struct BeaconSim {
+  float tiltDeg = 0.0f;     // fixed tilt of the beacon about x
+  float rockDeg = 0.0f;     // +/- rocking about x while the stack moves
+  float rockHz = 0.4f;
+  float flipDeg = 0.0f;     // handling: rotate to this tilt ...
+  float flipAtS = -1.0f;    // ... starting here, over 0.6 s, hold flipHoldS, rotate back
+  float flipHoldS = 1.0f;
+  float biasMg = 0.0f;
+  float noiseMg = 3.0f;
+  bool wake = true;         // the lift-start interrupt
+  uint32_t seed = 7;
+};
+
+struct SimResult {
+  uint16_t published;      // at the end of the first set
+  uint16_t sets;           // sets that ended
+  uint16_t dips;           // count events the validator saw
+  uint16_t publishedAtDip[32];  // published right after each dip
+  uint32_t dipMs[32];
+  uint32_t firstTwoMs;     // when published first reached 2 (0 = never)
+  size_t moves;
+  MoveVerdict verdict[32];
+  bool anchored;
+};
+
+static RepValidator s_val;
+static SimResult s_res;
+
+static const float kPi = 3.14159265f;
+
+// Position (mm) and acceleration (mm/s^2) of the stack at t.
+static void stackAt(const StackScript& s, float t, float* x, float* a) {
+  float t0 = 1.0f;  // 1 s at rest first
+  float from = 0.0f;
+  *a = 0.0f;
+  *x = 0.0f;
+  if (t < t0) return;
+  for (int i = 0; i < s.n; i++) {
+    const StackStep& st = s.step[i];
+    if (t < t0 + st.durS) {
+      const float tau = (t - t0) / st.durS;
+      if (st.drop) {
+        const float u = t - t0;
+        *x = from - 0.5f * 9806.65f * u * u;
+        *a = -9806.65f;
+      } else {
+        const float d = st.toMm - from;
+        *x = from + d * 0.5f * (1.0f - cosf(kPi * tau));
+        *a = d * kPi * kPi / (2.0f * st.durS * st.durS) * cosf(kPi * tau);
+      }
+      return;
+    }
+    if (st.drop) {  // landing: the fall's speed is stopped in 30 ms, then rings at 15 Hz
+      const float v = 9806.65f * st.durS;
+      const float u = t - (t0 + st.durS);
+      if (u < 0.03f) *a = v / 0.03f;
+      else if (u < 0.5f) *a = 800.0f * 9.80665f * expf(-u / 0.1f) * cosf(2.0f * kPi * 15.0f * u);
+    }
+    t0 += st.durS;
+    from = st.toMm;
+  }
+  *x = from;
+}
+
+static float scriptEnd(const StackScript& s) {
+  float t = 1.0f;
+  for (int i = 0; i < s.n; i++) t += s.step[i].durS;
+  return t;
+}
+
+static float beaconTiltRad(const BeaconSim& b, float t, bool moving) {
+  float deg = b.tiltDeg + (moving ? b.rockDeg * sinf(2.0f * kPi * b.rockHz * t) : 0.0f);
+  if (b.flipAtS >= 0.0f && t >= b.flipAtS) {
+    const float u = t - b.flipAtS;
+    float f = 0.0f;
+    if (u < 0.6f) f = 0.5f * (1.0f - cosf(kPi * u / 0.6f));
+    else if (u < 0.6f + b.flipHoldS) f = 1.0f;
+    else if (u < 1.2f + b.flipHoldS) f = 0.5f * (1.0f + cosf(kPi * (u - 0.6f - b.flipHoldS) / 0.6f));
+    deg += b.flipDeg * f;
+  }
+  return deg * kPi / 180.0f;
+}
+
+static void sample(const StackScript& s, const BeaconSim& b, Lcg& rng, float t, int16_t out[3]) {
+  float x, a;
+  stackAt(s, t, &x, &a);
+  const bool moving = t > 1.0f && t < scriptEnd(s);
+  const float f = 1000.0f + a / 9.80665f + b.biasMg;  // specific force along world up, mg
+  const float th = beaconTiltRad(b, t, moving);
+  const float up[3] = {0.0f, sinf(th), cosf(th)};
+  for (int k = 0; k < 3; k++) {
+    float v = f * up[k] + b.noiseMg * rng.gauss();
+    v = 4.0f * lroundf(v / 4.0f);
+    if (v > 1996.0f) v = 1996.0f;
+    if (v < -2000.0f) v = -2000.0f;
+    out[k] = static_cast<int16_t>(v);
+  }
+}
+
+static uint16_t thsMg(int32_t mg) { return static_cast<uint16_t>((mg + 8) / 16 * 16); }  // INT1_THS steps
+
+static void simulate(const StackScript& s, const BeaconSim& b, const RepValidatorConfig& vc = RepValidatorConfig()) {
+  memset(&s_res, 0, sizeof(s_res));
+  s_val.setConfig(vc);
+  RepCounterConfig cc;
+  cc.minRepIntervalMs = 600;
+  cc.holdoffMs = 350;
+  cc.setTimeoutMs = 5000;
+  cc.maxRepsPerSet = 99;
+  RepCounter rc(cc);
+  Lcg rng = {b.seed};
+  // Calibration: the resting reading (noise-free) and its z axis.
+  const float th0 = beaconTiltRad(b, 0.0f, false);
+  const int16_t rest[3] = {0, static_cast<int16_t>(lroundf((1000.0f + b.biasMg) * sinf(th0))),
+                           static_cast<int16_t>(lroundf((1000.0f + b.biasMg) * cosf(th0)))};
+  const int32_t restZ = abs(rest[2]);
+  const uint16_t countThr = thsMg(restZ - 64), rearmThr = thsMg(restZ + 64), wakeThr = thsMg(restZ + 48);
+  int run = 0, wakeRun = 0;
+  RepPhase lastPhase = rc.phase();
+  bool done = false;
+  const float end = scriptEnd(s) + 8.0f;
+  for (uint32_t ms = 0; ms < end * 1000.0f && !done; ms += 20) {
+    int16_t acc[3];
+    sample(s, b, rng, ms / 1000.0f, acc);
+    if (s_val.active()) s_val.addSample(ms, acc);
+    const int32_t z = abs(acc[2]);
+    if (rc.phase() != lastPhase) run = 0;  // re-armed for the new phase
+    lastPhase = rc.phase();
+    if (b.wake && !rc.active()) {
+      wakeRun = z > wakeThr ? wakeRun + 1 : 0;
+      if (wakeRun >= 2) {
+        rc.onWake(ms);
+        s_val.begin(ms, rest, true);
+        wakeRun = 0;
+      }
+    } else {
+      wakeRun = 0;
+    }
+    if (rc.phase() == RepPhase::Count) {
+      run = z < countThr ? run + 1 : 0;
+      if (run >= 4 && rc.onCountEvent(ms)) {
+        if (!s_val.active()) s_val.begin(ms, rest, false);
+        s_val.onCandidate(ms);
+        if (s_res.dips < 32) {
+          s_res.dipMs[s_res.dips] = ms;
+          s_res.publishedAtDip[s_res.dips] = s_val.published();
+        }
+        s_res.dips++;
+      }
+    } else if (rc.phase() == RepPhase::Rearm) {
+      run = z > rearmThr ? run + 1 : 0;
+      if (run >= 2) rc.onRearmEvent(ms);
+    }
+    if (s_res.firstTwoMs == 0 && s_val.published() >= 2) s_res.firstTwoMs = ms;
+    if (rc.poll(ms)) {
+      s_val.endSession(ms);
+      s_res.sets++;
+      if (s_res.sets == 1) {
+        s_res.published = s_val.published();
+        s_res.anchored = s_val.anchored();
+        s_res.moves = s_val.moveCount();
+        for (size_t k = 0; k < s_res.moves && k < 32; k++) s_res.verdict[k] = s_val.move(k).verdict;
+      }
+    } else if (!rc.active() && s_val.active()) {
+      s_val.endSession(ms);  // a wake with no dip: the session is dropped
+    }
+  }
+}
+
+static size_t countVerdict(MoveVerdict v) {
+  size_t n = 0;
+  for (size_t k = 0; k < s_res.moves && k < 32; k++) n += s_res.verdict[k] == v ? 1 : 0;
+  return n;
+}
+
+// Lat pulldown: sitting down with the bar lifts the stack to holdMm and holds it there; the reps
+// go up from there and back; after the last rep the lifter lets go (or stands up with the bar).
+static StackScript pulldown(int reps, bool standUp, float holdS = 1.5f) {
+  StackScript s;
+  s.move(200.0f, 0.9f).hold(holdS).reps(reps, 450.0f).hold(0.5f);
+  if (standUp) s.move(0.0f, 0.7f);
+  else s.drop(0.0f);
+  return s;
+}
+
+void test_val_reps_from_rest() {
+  StackScript s;
+  s.reps(8, 450.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(1, s_res.sets);
+  TEST_ASSERT_TRUE(s_res.anchored);
+  TEST_ASSERT_EQUAL_UINT16(8, s_res.dips);
+  TEST_ASSERT_EQUAL_UINT16(8, s_res.published);
+}
+
+void test_val_pulldown_setup_and_let_go() {
+  simulate(pulldown(10, false), BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(12, s_res.dips);  // setup + 10 reps + the fall
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+  TEST_ASSERT_TRUE(s_res.verdict[0] == MoveVerdict::Superseded || s_res.verdict[0] == MoveVerdict::NoReturn);
+  TEST_ASSERT_TRUE(s_res.verdict[11] == MoveVerdict::NoRise);
+}
+
+void test_val_pulldown_stand_up() {
+  simulate(pulldown(10, true), BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(12, s_res.dips);
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+  TEST_ASSERT_TRUE(s_res.verdict[11] == MoveVerdict::NoRise);
+}
+
+void test_val_setup_merged_into_rep1() {
+  StackScript s;  // sits down and pulls at once: the setup's stop and rep 1 share one rise
+  s.move(200.0f, 0.9f).hold(0.15f).move(650.0f, 1.0f).move(200.0f, 1.2f).reps(9, 450.0f).hold(0.5f).drop(0.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+}
+
+void test_val_fidget_ignored() {
+  StackScript s;
+  s.move(200.0f, 0.9f).hold(1.5f).reps(5, 450.0f).move(320.0f, 0.5f).move(200.0f, 0.5f).reps(5, 450.0f).hold(0.5f).drop(0.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+  TEST_ASSERT_EQUAL_UINT32(1, countVerdict(MoveVerdict::Small));
+}
+
+void test_val_partial_reps_counted() {
+  StackScript s;  // reps 6 and 8 at 55 % of the travel
+  s.move(200.0f, 0.9f).hold(1.5f).reps(5, 450.0f).reps(1, 250.0f).reps(1, 450.0f).reps(1, 250.0f).reps(2, 450.0f);
+  s.hold(0.5f).drop(0.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+}
+
+void test_val_jiggles_ignored() {
+  StackScript s;  // 3 cm knocks at rest, then a set with knocks between reps
+  s.move(30.0f, 0.2f).move(0.0f, 0.2f).hold(0.8f).move(30.0f, 0.2f).move(0.0f, 0.2f).hold(8.0f);
+  s.reps(3, 450.0f).move(30.0f, 0.2f).move(0.0f, 0.2f).hold(0.6f).reps(3, 450.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(0, s_res.published);  // the first session holds only the knocks
+  TEST_ASSERT_EQUAL_UINT16(2, s_res.sets);
+  TEST_ASSERT_EQUAL_UINT16(6, s_val.published());  // the set after it
+}
+
+void test_val_long_pause_at_bottom_no_split() {
+  StackScript s;
+  s.reps(4, 450.0f).hold(3.5f).reps(4, 450.0f);  // 4 s would reach the 5 s set timeout before rep 5's dip
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(1, s_res.sets);
+  TEST_ASSERT_EQUAL_UINT16(8, s_res.published);
+}
+
+void test_val_wake_missed_counts_first_dip_unchecked() {
+  BeaconSim b;
+  b.wake = false;
+  StackScript s;
+  s.reps(8, 450.0f);
+  simulate(s, b);
+  TEST_ASSERT_FALSE(s_res.anchored);
+  TEST_ASSERT_TRUE(s_res.verdict[0] == MoveVerdict::Unchecked);
+  TEST_ASSERT_EQUAL_UINT16(8, s_res.published);
+}
+
+void test_val_single_cycle_counts_one() {
+  StackScript s;
+  s.reps(1, 450.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(1, s_res.published);
+}
+
+void test_val_fast_path_timing() {
+  StackScript s;
+  s.reps(6, 450.0f);
+  simulate(s, BeaconSim());
+  TEST_ASSERT_EQUAL_UINT16(6, s_res.dips);
+  TEST_ASSERT_EQUAL_UINT16(0, s_res.publishedAtDip[0]);
+  TEST_ASSERT_EQUAL_UINT16(0, s_res.publishedAtDip[1]);  // reps 1-2 wait for rep 2's return
+  TEST_ASSERT_TRUE(s_res.firstTwoMs > s_res.dipMs[1] && s_res.firstTwoMs < s_res.dipMs[2]);  // 0 -> 2 as rep 3 starts
+  TEST_ASSERT_EQUAL_UINT16(3, s_res.publishedAtDip[2]);  // from rep 3 on: at the dip
+  TEST_ASSERT_EQUAL_UINT16(4, s_res.publishedAtDip[3]);
+  TEST_ASSERT_EQUAL_UINT16(6, s_res.publishedAtDip[5]);
+}
+
+void test_val_accelerometer_bias() {
+  BeaconSim b;
+  b.biasMg = 5.0f;  // the resting reading includes it, the motion does not
+  simulate(pulldown(10, false), b);
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+}
+
+void test_val_rocking_still_counts() {
+  BeaconSim b;
+  b.tiltDeg = 10.0f;
+  b.rockDeg = 17.0f;
+  simulate(pulldown(10, false), b);
+  TEST_ASSERT_EQUAL_UINT16(10, s_res.published);
+}
+
+void test_val_flipped_beacon_tilted() {
+  BeaconSim b;  // picked up and turned over, then put back: no reps
+  b.flipDeg = 150.0f;
+  b.flipAtS = 1.3f;
+  StackScript s;
+  s.move(100.0f, 0.5f).hold(2.0f).move(0.0f, 0.6f).hold(1.0f);
+  simulate(s, b);
+  TEST_ASSERT_TRUE(s_res.dips >= 1);
+  TEST_ASSERT_EQUAL_UINT16(0, s_res.published);
+  TEST_ASSERT_TRUE(countVerdict(MoveVerdict::Tilted) >= 1);
+}
+
+void test_val_verdict_names() {
+  TEST_ASSERT_EQUAL_STRING("noreturn", moveVerdictName(MoveVerdict::NoReturn));
+  TEST_ASSERT_EQUAL_STRING("fast", moveVerdictName(MoveVerdict::Fast));
+  TEST_ASSERT_TRUE(moveCounted(MoveVerdict::Unchecked));
+  TEST_ASSERT_FALSE(moveCounted(MoveVerdict::Held));
+}
+
 void setup() {
-  delay(2000);  // let the board's USB serial come up before Unity starts printing
+  delay(5000);  // let the board's USB serial come up (and the test runner attach) before Unity prints
   UNITY_BEGIN();
   RUN_TEST(test_encode_layout);
   RUN_TEST(test_roundtrip);
@@ -1191,6 +1596,9 @@ void setup() {
   RUN_TEST(test_counter_max_reps);
   RUN_TEST(test_counter_seq_wrap);
   RUN_TEST(test_counter_millis_wrap);
+  RUN_TEST(test_counter_wake_becomes_the_set);
+  RUN_TEST(test_counter_wake_expires_quietly);
+  RUN_TEST(test_counter_wake_ignored_during_set);
   RUN_TEST(test_tracker_new_set_and_in_use);
   RUN_TEST(test_tracker_duplicates_and_rssi_not_dirty);
   RUN_TEST(test_tracker_seq_change_starts_new_set);
@@ -1232,6 +1640,21 @@ void setup() {
   RUN_TEST(test_store_header_roundtrip_and_layout);
   RUN_TEST(test_store_header_rejects_bad_records);
   RUN_TEST(test_store_record_size_and_rows);
+  RUN_TEST(test_val_reps_from_rest);
+  RUN_TEST(test_val_pulldown_setup_and_let_go);
+  RUN_TEST(test_val_pulldown_stand_up);
+  RUN_TEST(test_val_setup_merged_into_rep1);
+  RUN_TEST(test_val_fidget_ignored);
+  RUN_TEST(test_val_partial_reps_counted);
+  RUN_TEST(test_val_jiggles_ignored);
+  RUN_TEST(test_val_long_pause_at_bottom_no_split);
+  RUN_TEST(test_val_wake_missed_counts_first_dip_unchecked);
+  RUN_TEST(test_val_single_cycle_counts_one);
+  RUN_TEST(test_val_fast_path_timing);
+  RUN_TEST(test_val_accelerometer_bias);
+  RUN_TEST(test_val_rocking_still_counts);
+  RUN_TEST(test_val_flipped_beacon_tilted);
+  RUN_TEST(test_val_verdict_names);
   UNITY_END();
 }
 

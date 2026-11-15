@@ -38,12 +38,15 @@ void TuningConsole::endLine(Line& line) {
 void TuningConsole::printHelp() {
   Console.println(F("commands:"));
   Console.println(F("  s                    status"));
-  Console.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps, >bx >by >bz)"));
+  Console.println(F("  st                   toggle Teleplot stream (>a >cnt >rearm >int >reps >pos >vel, fields)"));
   Console.println(F("  mode stack|paper|lever   load that mode's preset"));
   Console.println(F("  dl <mg> / dh <mg>    count / re-arm delta"));
   Console.println(F("  durl <n> / durh <n>  count / re-arm duration in samples (20 ms)"));
   Console.println(F("  hold <ms>            hold-off after the re-arm event"));
   Console.println(F("  minint <ms>          minimum time between counted reps"));
+  Console.println(F("  chk on|off           rep check (stack mode): off counts every dip, logs what it would ignore"));
+  Console.println(F("  travel <mm>          rep check: smallest rep travel"));
+  Console.println(F("  match <pct>          rep check: % of the median travel of the set's reps"));
   Console.println(F("  axis x|y|z|auto      motion axis"));
   Console.println(F("  cal                  recalibrate (keep the beacon still)"));
   Console.println(F("  reset                end the current set"));
@@ -101,6 +104,22 @@ void TuningConsole::execute(char* line) {
     hooks_.settingsChanged(false);
   } else if (strcmp(cmd, "minint") == 0 && parseNumber(arg, 0, 5000, &v)) {
     s_.minRepIntervalMs = static_cast<uint32_t>(v);
+    hooks_.settingsChanged(false);
+  } else if (strcmp(cmd, "chk") == 0) {
+    if (arg != nullptr && strcmp(arg, "on") == 0) {
+      s_.repCheck = true;
+    } else if (arg != nullptr && strcmp(arg, "off") == 0) {
+      s_.repCheck = false;
+    } else {
+      Console.println(F("usage: chk on|off"));
+      return;
+    }
+    hooks_.settingsChanged(false);
+  } else if (strcmp(cmd, "travel") == 0 && parseNumber(arg, 20, 1000, &v)) {
+    s_.repMinTravelMm = static_cast<uint16_t>(v);
+    hooks_.settingsChanged(false);
+  } else if (strcmp(cmd, "match") == 0 && parseNumber(arg, 0, 100, &v)) {
+    s_.repMatchPct = static_cast<uint8_t>(v);
     hooks_.settingsChanged(false);
   } else if (strcmp(cmd, "cal") == 0) {
     hooks_.recalibrate();

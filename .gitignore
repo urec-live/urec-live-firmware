@@ -10,3 +10,6 @@ src/gateway/secrets.h
 # Gym/bench session logs from tools/gym_capture.py and idle_soak.py (the gateway banner prints its URLs)
 sessions/
 __pycache__/
+
+# replay tool build output (tools/replay_reps/run_replay.cmd)
+tools/replay_reps/build/

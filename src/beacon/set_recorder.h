@@ -42,6 +42,8 @@ class SetRecorder {
   uint8_t flags(size_t i) const;
   size_t countN() const { return countRel_; }
   uint16_t countMs(size_t i) const;
+  // A millis() time in the rows' time base (after finish()); negative if before the first row.
+  int32_t relMs(uint32_t ms) const { return static_cast<int32_t>(ms - firstMs_); }
 
  private:
   size_t head_ = 0;          // oldest sample
@@ -49,6 +51,7 @@ class SetRecorder {
   bool wrapped_ = false;
   uint32_t startMs_ = 0;     // millis() at clear(); stored times are relative to it (mod 2^16)
   uint32_t lastAddMs_ = 0;
+  uint32_t firstMs_ = 0;     // millis() of the first kept sample, after finish()
   size_t countAbs_ = 0;      // counted reps recorded (absolute millis())
   size_t countRel_ = 0;      // counted reps inside the kept samples, after finish()
 };

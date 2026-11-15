@@ -9,6 +9,10 @@
 // on a timer deadline (hold-off, repeat burst, set timeout) or on the 2 s housekeeping tick.
 // docs/rep-counting-walkthrough.md explains every step.
 //
+// In stack mode a second LIS3DH interrupt wakes the beacon when a lift starts, and the 50 Hz
+// sampler then follows the stack (lib/gym_core/src/rep_validator.h): a dip only counts if the stack
+// went up and came back down like a rep, so setting up and letting go after the set do not count.
+//
 // With a magnetometer on the STEMMA QT chain the beacon also weighs each set, reproducing
 // W8-Scope (Radhakrishnan, Misra & Balan, 2021): while a set is active it samples at 50 Hz, and
 // when the set ends it prints the weight. docs/weight-sensing.md explains it.
@@ -30,6 +34,7 @@
 #include "lis3dh_motion.h"
 #include "motion_settings.h"
 #include "rep_counter.h"
+#include "rep_validator.h"
 #include "tuning_console.h"
 #include "weight_sensing.h"
 
@@ -55,6 +60,16 @@ gym::RepCounterConfig counterConfig(const MotionSettings& s) {
   return c;
 }
 
+gym::RepValidatorConfig validatorConfig(const MotionSettings& s) {
+  gym::RepValidatorConfig c;
+  c.minTravelMm = s.repMinTravelMm;
+  c.matchPct = s.repMatchPct;
+  c.startMatchPct = BEACON_REP_START_MATCH_PCT;
+  c.turnMm = BEACON_REP_TURN_MM;
+  c.tiltDeg = BEACON_REP_TILT_DEG;
+  return c;
+}
+
 // Wrap-safe "deadline has been reached", for deadlines that are always recent (< 24 days).
 bool due(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now - deadline) >= 0; }
 
@@ -73,6 +88,17 @@ IBeaconAdvertiser g_adv;
 WeightSensing g_weight;
 MotionSettings g_settings = settingsFromConfig();
 gym::RepCounter g_counter(counterConfig(g_settings));
+// The rep check (stack mode): follows the stack from the 50 Hz samples during a session, which runs
+// from the lift-start wake (or the first dip) to the end of the set, and decides which dips count.
+gym::RepValidator g_validator(validatorConfig(g_settings));
+int16_t g_restMg[3] = {0, 0, 1000};  // gravity: the latest still reading (calibration, drift check)
+bool g_wakeArmed = false;            // LIS3DH interrupt 2 armed for a lift starting
+bool g_sessionCheck = false;         // this session counts what the check counts (else: every dip)
+bool g_sessionWake = false;          // ... and started at the wake (at rest)
+bool g_sessionHadSet = false;        // ... and a dip made it a set
+int16_t g_sessionRest[3] = {0, 0, 0};
+uint16_t g_published = 0;            // reps broadcast for the set in progress
+bool g_moveLogged[gym::RepValidator::kMaxMoves];
 Calibration g_cal = {};
 PhaseSpec g_countSpec = {};
 PhaseSpec g_rearmSpec = {};
@@ -143,7 +169,23 @@ void blinkError() {
 // Arms LIS3DH interrupt 1 for whatever the counter waits for. Every (re)configuration ends the
 // same way: clear the latch, drop the edge it may have produced, and look at the pin, because a
 // latched INT1 that is already high never produces another rising edge.
+// Interrupt 2, the lift-start wake: armed while no session is active, in stack mode, so the rep
+// check sees the stack leave rest. It shares the INT1 pin with interrupt 1.
+void syncWake(bool force = false) {
+  const bool want = g_cal.valid && g_settings.mode == MotionMode::Stack && !g_counter.active();
+  if (!force && want == g_wakeArmed) return;
+  if (want) {
+    g_imu.armWake(g_cal.axis, true, g_cal.restMg + BEACON_WAKE_DELTA_MG, 2);
+  } else {
+    g_imu.disarmWake();
+  }
+  (void)g_imu.readInt2Source();
+  g_wakeArmed = want;
+  if (digitalRead(BEACON_INT_PIN) == HIGH) g_serviceNow = true;
+}
+
 void syncArm(bool force = false) {
+  syncWake(force);
   const gym::RepPhase want = g_counter.phase();
   if (!force && g_hwArmed && want == g_hwPhase) return;
 
@@ -238,29 +280,126 @@ const char* weightBlocked() {
   return g_settings.mode == MotionMode::Lever ? "lever mode (the beacon must sit on the weight stack)" : nullptr;
 }
 
-// Keeps the weight recorder in step with the rep counter: it records exactly while a set is
-// active. A set ended by the 5 s timeout is weighed in onSetEnded(); one ended any other way
-// (cal, reset, mode, axis, a drift recalibration) is aborted here.
+// Keeps the weight recorder and the rep check in step with the rep counter: they run exactly
+// while a session is active (from the lift-start wake, or the first dip, to the set's end). A set
+// ended by the 5 s timeout is weighed in onSetEnded(); one ended any other way (cal, reset, mode,
+// axis, a drift recalibration) is aborted here, and so is a wake that no dip followed (quietly).
 void syncRecorder(uint32_t now) {
-  const bool active = g_counter.setActive();
+  const bool active = g_counter.active();
   if (active && !g_weight.inSet()) g_weight.startSet(now, weightBlocked());
-  if (!active && g_weight.inSet()) g_weight.abortSet(now);
+  if (!active && g_weight.inSet()) g_weight.abortSet(now, !g_sessionHadSet);
+  if (!active && g_validator.active()) g_validator.endSession(now);
+  g_weight.setMotionSampling(g_validator.active(), now);
 }
 
-void onRepCounted(uint32_t now) {
-  syncRecorder(now);  // the first rep starts the set, and with it the recording
-  g_weight.onCount(now);
-  g_setReps = g_counter.reps();
+// A session starts: at the wake (the stack at rest, anchored) or at a dip that came without one.
+void startSession(uint32_t now, bool wake) {
+  g_sessionHadSet = false;
+  g_published = 0;
+  g_sessionWake = wake;
+  g_sessionCheck = g_settings.mode == MotionMode::Stack && g_settings.repCheck;
+  memcpy(g_sessionRest, g_restMg, sizeof(g_sessionRest));
+  memset(g_moveLogged, 0, sizeof(g_moveLogged));
+  if (g_settings.mode == MotionMode::Stack) {
+    g_validator.setConfig(validatorConfig(g_settings));
+    g_validator.begin(now, g_sessionRest, wake);
+  }
+  syncRecorder(now);  // the recording starts with the session
+}
+
+void broadcastReps(uint32_t now, uint16_t reps) {
+  const uint16_t before = g_published;
+  g_published = reps;
+  g_setReps = reps;
   g_lastFrame.equipmentType = BEACON_EQUIPMENT_TYPE;
   g_lastFrame.machineInstance = BEACON_MACHINE_INSTANCE;
   g_lastFrame.setSeq = g_counter.setSeq();
-  g_lastFrame.reps = g_counter.reps();
+  g_lastFrame.reps = reps;
   g_lastFrame.txPower = BEACON_RSSI_AT_1M;
-  LOG("[rep] %u  (set seq %u)\n", g_lastFrame.reps, g_lastFrame.setSeq);
+  if (reps > before + 1) {
+    LOG("[rep] %u  (set seq %u; reps %u-%u counted together once they matched)\n", reps, g_lastFrame.setSeq,
+        before + 1, reps);
+  } else {
+    LOG("[rep] %u  (set seq %u)\n", reps, g_lastFrame.setSeq);
+  }
   advertise(g_lastFrame, now);
   // Paper: "double advertisements to decrease the loss rate"; a newer rep replaces this one.
   g_repeatPending = true;
   g_repeatAtMs = now + BEACON_ADV_REPEAT_DELAY_MS;
+}
+
+const char* moveReason(gym::MoveVerdict v) {
+  switch (v) {
+    case gym::MoveVerdict::NoRise: return "no rise (the stack was going down)";
+    case gym::MoveVerdict::NoReturn: return "no return";
+    case gym::MoveVerdict::Small: return "too small";
+    case gym::MoveVerdict::Superseded: return "part of the next lift";
+    case gym::MoveVerdict::Dropped: return "did not match the next rep";
+    case gym::MoveVerdict::Tilted: return "beacon tilted";
+    default: return gym::moveVerdictName(v);
+  }
+}
+
+void printMm(int16_t mm) {
+  if (mm == gym::RepValidator::kUnknownMm) {
+    Console.print('?');
+  } else {
+    Console.print(mm);
+  }
+}
+
+// One line per move the check rejects, once it is decided.
+void logMoves() {
+  if (!Console) return;
+  for (size_t i = 0; i < g_validator.moveCount(); i++) {
+    if (g_moveLogged[i]) continue;
+    const gym::MoveInfo m = g_validator.move(i);
+    if (m.verdict == gym::MoveVerdict::Pending || m.verdict == gym::MoveVerdict::Held) continue;
+    g_moveLogged[i] = true;
+    if (gym::moveCounted(m.verdict)) continue;  // its [rep] line says it
+    Console.printf("[move] %s: %s", g_sessionCheck ? "ignored" : "would ignore", moveReason(m.verdict));
+    if (m.verdict == gym::MoveVerdict::Tilted) {
+      Console.printf(" %u deg\n", m.tiltDeg);
+    } else if (m.verdict != gym::MoveVerdict::Superseded) {
+      Console.print(F(" (up "));
+      printMm(m.riseMm);
+      Console.print(F(" mm, back "));
+      printMm(m.returnMm);
+      Console.println(F(" mm)"));
+    } else {
+      Console.println();
+    }
+  }
+}
+
+// What the check has decided since the last call: the counted reps go to the weight recorder
+// (with their dips' times) and, when the check counts, to the gateway.
+void publishChecked(uint32_t now) {
+  uint32_t dipMs = 0;
+  while (g_validator.popCounted(&dipMs)) {
+    if (g_sessionCheck) g_weight.onCount(dipMs);
+  }
+  if (g_sessionCheck && g_validator.published() > g_published) broadcastReps(now, g_validator.published());
+  logMoves();
+}
+
+// The rep counter counted a dip.
+void onDip(uint32_t now) {
+  if (!g_counter.active()) return;
+  if (!g_weight.inSet() && !g_validator.active()) startSession(now, false);  // no wake came first
+  g_sessionHadSet = true;
+  if (g_settings.mode == MotionMode::Stack) {
+    if (!g_validator.active()) {
+      g_validator.setConfig(validatorConfig(g_settings));
+      g_validator.begin(now, g_sessionRest, false);
+    }
+    g_validator.onCandidate(now);
+  }
+  if (!g_sessionCheck) {  // lever/paper mode, or the check off: every dip counts, as before
+    g_weight.onCount(now);
+    broadcastReps(now, g_counter.reps());
+  }
+  publishChecked(now);
 }
 
 // ---------------------------------------------------------------- calibration
@@ -281,7 +420,9 @@ bool calibrate(uint32_t now) {
   syncRecorder(now);  // a set cut short by calibration is not weighed
   g_repeatPending = false;
   g_imu.disarm();
+  g_imu.disarmWake();
   g_hwArmed = false;
+  g_wakeArmed = false;
   g_lastCalAttemptMs = now;
   g_lastDriftCheckMs = now;
 
@@ -302,6 +443,7 @@ bool calibrate(uint32_t now) {
     cal.measured = true;
     cal.axis = chooseAxis(g_settings, mean);
     memcpy(cal.meanMg, mean, sizeof(mean));
+    memcpy(g_restMg, mean, sizeof(mean));  // the rep check's gravity
     cal.restMg = static_cast<uint16_t>(abs(mean[cal.axis]));
     why = checkRest(g_settings, cal.restMg);
   }
@@ -335,6 +477,7 @@ void checkDrift(uint32_t now) {
   if (p2p[0] > BEACON_STILL_P2P_MG || p2p[1] > BEACON_STILL_P2P_MG || p2p[2] > BEACON_STILL_P2P_MG) {
     return;  // someone is moving the machine; check again later
   }
+  memcpy(g_restMg, mean, sizeof(mean));  // still: the rep check's latest gravity, even without a recalibration
   const int drift = abs(mean[g_cal.axis] - g_cal.meanMg[g_cal.axis]);
   if (drift > BEACON_DRIFT_MG) {
     LOG("[cal] resting reading moved %d mg - recalibrating\n", drift);
@@ -345,13 +488,18 @@ void checkDrift(uint32_t now) {
 // ---------------------------------------------------------------- events
 
 void serviceInterrupt(uint32_t now) {
-  const uint8_t src = g_imu.readInt1Source();  // also clears the latched pin
+  const uint8_t src = g_imu.readInt1Source();  // also clears the latched pin ...
+  const uint8_t src2 = g_imu.readInt2Source();  // ... with this one: both generators drive INT1
+  if ((src2 & Lis3dhMotion::kSrcIA) != 0 && g_wakeArmed && !g_counter.active()) {
+    g_counter.onWake(now);  // a lift is starting: the session (sampler, recording, check) starts at rest
+    startSession(now, true);
+  }
   if ((src & Lis3dhMotion::kSrcIA) == 0 || !g_hwArmed) return;
 
   if (g_hwPhase == gym::RepPhase::Count && g_countSpec.valid &&
       (src & Lis3dhMotion::eventBit(g_cal.axis, g_countSpec.high))) {
     if (g_counter.onCountEvent(now)) {
-      onRepCounted(now);
+      onDip(now);
     } else {
       LOG("[int] count event ignored (min interval / max reps)\n");
     }
@@ -363,11 +511,28 @@ void serviceInterrupt(uint32_t now) {
 }
 
 void onSetEnded(uint32_t now) {
-  LOG("[set] done: %u reps\n", g_setReps);
+  uint16_t ignored = 0;
+  bool lateCount = false;
+  if (g_validator.active()) {
+    // Decide what is still open (a lone first cycle counts; a last lift with no return does not).
+    g_validator.endSession(now);
+    const uint16_t before = g_published;
+    publishChecked(now);
+    lateCount = g_published != before;
+    ignored = g_validator.ignored();
+    g_weight.setMoves(g_sessionRest, g_sessionWake, g_validator);
+  }
+  if (g_settings.mode == MotionMode::Stack && ignored > 0) {
+    LOG("[set] done: %u reps (%u moves %s)\n", g_setReps, ignored, g_sessionCheck ? "ignored" : "the check would ignore");
+  } else {
+    LOG("[set] done: %u reps\n", g_setReps);
+  }
   g_weight.finishSet(now, g_counter.lastEventMs(), g_counter.setSeq(), g_setReps,
                      static_cast<uint16_t>(g_settings.minRepIntervalMs));
   g_setReps = 0;
-  g_repeatPending = false;
+  g_published = 0;
+  g_sessionHadSet = false;
+  if (!lateCount) g_repeatPending = false;  // a count decided only now still gets its second burst
   checkDrift(now);
 }
 
@@ -402,6 +567,30 @@ void printSpec(const char* label, const PhaseSpec& p) {
                 p.thresholdMg, p.duration, p.duration * 20u);
 }
 
+// The rep check's settings and what it decided in the last set.
+void printCheck() {
+  if (g_settings.mode != MotionMode::Stack) {
+    Console.println(F("rep check: off in this mode (every dip counts)"));
+    return;
+  }
+  Console.printf("rep check: %s, travel >= %u mm and >= %u %% of the set's reps, wake at rest + %u mg\n",
+                 g_settings.repCheck ? "on" : "OFF (counts every dip, logs what it would ignore)",
+                 g_settings.repMinTravelMm, g_settings.repMatchPct, BEACON_WAKE_DELTA_MG);
+  const size_t n = g_validator.moveCount();
+  if (n == 0) return;
+  Console.printf("  %s: %u counted, %u ignored", g_validator.active() ? "this set so far" : "last set",
+                 g_validator.published(), g_validator.ignored());
+  const uint32_t t0 = g_validator.move(0).dipMs;
+  uint8_t shown = 0;
+  for (size_t i = 0; i < n && shown < 8; i++) {
+    const gym::MoveInfo m = g_validator.move(i);
+    if (gym::moveCounted(m.verdict) || m.verdict == gym::MoveVerdict::Pending || m.verdict == gym::MoveVerdict::Held) continue;
+    Console.printf("%s %.1f s %s", shown == 0 ? ":" : ",", (m.dipMs - t0) / 1000.0f, gym::moveVerdictName(m.verdict));
+    shown++;
+  }
+  Console.println();
+}
+
 void printStatus() {
   Console.printf("%s #%u, tx %+d dBm\n", gym::equipmentName(BEACON_EQUIPMENT_TYPE),
                 BEACON_MACHINE_INSTANCE, BEACON_TX_POWER_DBM);
@@ -418,8 +607,9 @@ void printStatus() {
                 static_cast<unsigned long>(g_settings.holdoffMs),
                 static_cast<unsigned long>(g_settings.minRepIntervalMs), BEACON_SET_TIMEOUT_MS);
   Console.printf("phase %s, reps %u, set %s (seq %u), INT1 pin %d\n", phaseName(g_counter.phase()),
-                g_counter.reps(), g_counter.setActive() ? "active" : "idle", g_counter.setSeq(),
-                digitalRead(BEACON_INT_PIN));
+                g_counter.reps(), g_counter.setActive() ? "active" : (g_counter.woken() ? "woken" : "idle"),
+                g_counter.setSeq(), digitalRead(BEACON_INT_PIN));
+  printCheck();
   Console.print(F("battery "));
   printBattery(readBatteryMv(), usbPowered());
   Console.printf(", reported every %lu s\n", static_cast<unsigned long>(BEACON_STATUS_INTERVAL_MS / 1000));
@@ -438,10 +628,14 @@ void printConfig() {
   Console.printf("#define BEACON_HOLDOFF_MS %lu\n", static_cast<unsigned long>(g_settings.holdoffMs));
   Console.printf("#define BEACON_MIN_REP_INTERVAL_MS %lu\n",
                 static_cast<unsigned long>(g_settings.minRepIntervalMs));
+  Console.printf("#define BEACON_REP_CHECK %d\n", g_settings.repCheck ? 1 : 0);
+  Console.printf("#define BEACON_REP_MIN_TRAVEL_MM %u\n", g_settings.repMinTravelMm);
+  Console.printf("#define BEACON_REP_MATCH_PCT %u\n", g_settings.repMatchPct);
 }
 
 void onSettingsChanged(bool needsRecalibration) {
   g_counter.setConfig(counterConfig(g_settings));
+  g_validator.setConfig(validatorConfig(g_settings));  // chk on/off itself applies from the next set
   if (needsRecalibration) {
     calibrate(millis());
   } else {
@@ -496,6 +690,10 @@ void streamSample() {
   Serial.printf(">a:%d\n>cnt:%u\n>rearm:%u\n>int:%d\n>reps:%u\n", abs(g_weight.latestAccMg()[axis]),
                 g_countSpec.thresholdMg, g_rearmSpec.thresholdMg, digitalRead(BEACON_INT_PIN),
                 g_counter.reps());
+  if (g_validator.active()) {  // the rep check: stack position (mm) and the leaky velocity (m/s)
+    Serial.printf(">pos:%.0f\n>vel:%.2f\n>counted:%u\n", g_validator.positionMm(), g_validator.velocity(),
+                  g_validator.published());
+  }
   g_weight.printStreamFields();  // >tx >ty >tz (TMAG5273), >lx >ly >lz (LIS2MDL), in uT
 }
 
@@ -593,7 +791,13 @@ void loop() {
   const bool phoneJustListening = ble_console::poll(now);  // before the advertising decision
   syncConsoleAdvertising(now);
 
-  if (g_weight.tick(now) && usb && g_console.streaming()) streamSample();
+  if (g_weight.tick(now)) {
+    if (g_validator.active()) {
+      g_validator.addSample(now, g_weight.latestAccMg());
+      publishChecked(now);
+    }
+    if (usb && g_console.streaming()) streamSample();
+  }
 
   if (elapsed(now, g_lastHousekeepingMs, BEACON_HOUSEKEEPING_MS)) {
     g_lastHousekeepingMs = now;

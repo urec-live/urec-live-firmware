@@ -107,7 +107,7 @@ Each Adafruit breakout has a voltage regulator and a green power LED (through 10
 
 ## 4. The pipeline, step by step
 
-Recording starts with the first counted rep and stops when the rep counter ends the set (5 s without motion). Then `gym::analyzeMotion()` and `gym::magFeatures()` (`lib/gym_core/src/weight_pipeline.cpp`) process the recording:
+Recording starts with the session and stops when the rep counter ends the set (5 s without motion). In stack mode the session starts at the lift-start wake, with the stack still at rest ([walkthrough](rep-counting-walkthrough.md) §3.7); without a wake (lever mode, or a lift too gentle to wake it) it starts at the first counted dip, as before. Then `gym::analyzeMotion()` and `gym::magFeatures()` (`lib/gym_core/src/weight_pipeline.cpp`) process the recording:
 
 1. **Rest window and gravity.**
    - The set only ends 5 s after the last motion event, so the end of the recording shows the stack at rest.
@@ -134,7 +134,7 @@ Recording starts with the first counted rep and stops when the rep counter ends 
    - exactly 5 cm above the bottom on the way up: the 5-sample means on either side of that point, interpolated, so the value does not depend on how fast the stack passed it.
 7. **Feature vector** (`kWeightFeatureVersion 1`): `[top x, top y, top z, 5 cm x, 5 cm y, 5 cm z, height mm]`.
 
-The first rep's lift is not recorded: the recording starts when that rep is counted, at its top. A set of N counted reps therefore gives up to N−1 votes.
+The first rep's lift has no lowering before it, so it has no window: a set of N counted reps gives up to N−1 votes. (Recordings made before the wake start at that rep's top anyway.) The counted reps are the ones the rep check kept, at their dips' times; a setup or a let-go no longer adds a top. A set in which the check counted no rep at all is stored (§8.1) but not weighed: `[weight] set N not weighed: no rep counted`.
 
 ---
 
@@ -176,10 +176,10 @@ The first rep's lift is not recorded: the recording starts when that rep is coun
 ### 6.1 Lifecycle
 
 - **Boot:** after the LIS3DH and Bluefruit, the beacon looks for the magnetometers and loads their taught weights. Without any it prints `[weight] no magnetometer - weight sensing off`. It looks again every 30 s for a missing one while no set is active.
-- **First counted rep:** recording starts and the magnetometer wakes.
-- **During the set:** a 50 Hz sampler reads the LIS3DH and the magnetometer into the buffer. It runs on battery too: its wake-up does not depend on USB, unlike the console.
+- **Session start** (the lift-start wake in stack mode, else the first counted rep): recording starts and the magnetometer wakes.
+- **During the set:** a 50 Hz sampler reads the LIS3DH and the magnetometer into the buffer. It runs on battery too: its wake-up does not depend on USB, unlike the console. The same sampler feeds the rep check, with or without a magnetometer.
 - **Set timeout (5 s):** recording stops, the magnetometer sleeps, the pipeline runs, and the estimate is printed.
-- **A set ended any other way** (`cal`, `reset`, `mode`, `axis`, a drift recalibration) is not weighed: `[weight] set aborted`.
+- **A set ended any other way** (`cal`, `reset`, `mode`, `axis`, a drift recalibration) is not weighed: `[weight] set aborted`. A wake that no dip followed within 5 s is dropped without a message.
 
 In `lever` mode, weight sensing is off: the beacon must sit on the stack.
 
@@ -285,7 +285,10 @@ All rep-counting commands from walkthrough §7 still work. New:
 # TMAG5273 error=none
 # LIS2MDL b_rest_0.1uT=-212,415,-388 temp_c=25.1 reps=8
 # LIS2MDL error=none
-# counts_ms=0,2480,4950,...
+# counts_ms=1640,4120,6600,...
+# cal=15,-44,1045 wake=1
+# moves=1360:superseded:?:?,1640:count:812:455,4120:count:430:402
+# moves=6600:fast:428:405,...
 # valleys=11,135,259,...
 # segment=0 start=43 end=167 bottom=74 zenith=136 lift5=95 height_mm=297 valid=1
 ...
@@ -294,6 +297,12 @@ t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid
 ...
 # end
 ```
+
+`counts_ms` lists the counted reps (10 per line), at their dips' times. In stack mode two lines from the rep check ([walkthrough](rep-counting-walkthrough.md) §3.7) follow:
+- `cal=` is the resting reading the check started from (its gravity), and `wake=1` means the session started at the lift-start wake, at rest. `wake=0` means it started at a dip, mid-motion.
+- `moves=` lists every dip, counted or not, 3 per line: `time:verdict:rise:return`, with the rise and return in mm and `?` when unknown. `tools/replay_reps/` replays a set from these lines.
+
+Sets recorded before the rep check have neither line, and their `counts_ms` lists every dip.
 
 The dump is written a few lines at a time, only while the USB buffer has room, so a slow serial monitor never delays a rep. A new set aborts a dump in progress. It goes to the USB console only: on the Bluetooth console ([walkthrough](rep-counting-walkthrough.md) §7) the `[weight]` line still arrives, but `dump` says the CSV needs USB. Save it with the PlatformIO monitor's log filter or any terminal that logs to a file. For a labelled dataset, note the true weight of each set next to its `set=` number.
 
