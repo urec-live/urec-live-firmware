@@ -1,0 +1,802 @@
+<title>GetMeFit Beacon PCB</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: a drawing sheet. Title block on top, the 3D stage with its inspector beside it,
+     then readouts and the parts list underneath, the way a board drawing is annotated. */
+  :root {
+    --bg: #f1f4f5;
+    --surface: #ffffff;
+    --stage: #e3e9ec;
+    --ink: #15202a;
+    --muted: #586673;
+    --line: #d3dbe0;
+    --accent: #0a6b59;        /* solder-mask green */
+    --accent-ink: #ffffff;
+    --accent-soft: #dcefe9;
+    --keepout: #c21f5b;       /* antenna keep-out */
+    --quiet: #1a6db5;         /* magnetometer quiet zone */
+    --battery: #a86200;       /* battery placeholder */
+    --dim: #4d5b68;           /* dimension lines */
+    --warn-bg: #fff1cf;
+    --warn-ink: #6a4700;
+    --warn-line: #e6c36b;
+    --font-sans: "IBM Plex Sans", system-ui, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --radius: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f151a;
+      --surface: #172029;
+      --stage: #0a0f13;
+      --ink: #e5ecf1;
+      --muted: #93a2ae;
+      --line: #2a3742;
+      --accent: #42c2a1;
+      --accent-ink: #05241c;
+      --accent-soft: #173a33;
+      --keepout: #ff6f9e;
+      --quiet: #6fb6f3;
+      --battery: #f0aa3d;
+      --dim: #a9b6c1;
+      --warn-bg: #3a2c09;
+      --warn-ink: #ffd88a;
+      --warn-line: #7a5c14;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f151a;
+    --surface: #172029;
+    --stage: #0a0f13;
+    --ink: #e5ecf1;
+    --muted: #93a2ae;
+    --line: #2a3742;
+    --accent: #42c2a1;
+    --accent-ink: #05241c;
+    --accent-soft: #173a33;
+    --keepout: #ff6f9e;
+    --quiet: #6fb6f3;
+    --battery: #f0aa3d;
+    --dim: #a9b6c1;
+    --warn-bg: #3a2c09;
+    --warn-ink: #ffd88a;
+    --warn-line: #7a5c14;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding-block: 20px 40px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  h1, h2, h3 { font-weight: 600; text-wrap: balance; margin: 0; }
+  h1 { font-size: 26px; letter-spacing: -0.01em; }
+  h2 { font-size: 17px; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 500; }
+  p { margin: 0; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ---- title block ---- */
+  .titleblock { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; }
+  .titleblock .lede { color: var(--muted); max-width: 62ch; margin-top: 4px; }
+  .concept {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--warn-bg); color: var(--warn-ink);
+    border: 1px solid var(--warn-line); border-radius: var(--radius);
+    padding: 7px 12px; font-weight: 600;
+  }
+  .concept::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--warn-ink); flex: none; }
+
+  /* ---- stage + inspector ---- */
+  .bench { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: stretch; }
+  .stage {
+    position: relative; min-width: 0;
+    background: var(--stage); border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; aspect-ratio: 16 / 10; max-width: 100%; min-height: 320px;
+  }
+  .stage canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
+  .stage canvas:active { cursor: grabbing; }
+  .stage canvas.pointing { cursor: pointer; }
+  .stage-tools { position: absolute; top: 10px; left: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .stage-mark {
+    position: absolute; top: 10px; right: 10px;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--warn-ink); background: var(--warn-bg); border: 1px solid var(--warn-line);
+    border-radius: 4px; padding: 3px 7px; pointer-events: none;
+  }
+  .stage-hint { position: absolute; left: 12px; bottom: 9px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  .stage-status {
+    position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--muted);
+  }
+  .bar { width: min(260px, 70%); height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .tag {
+    position: absolute; left: 0; top: 0; white-space: nowrap;
+    font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 1.2;
+    padding: 2px 6px; border-radius: 4px;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  }
+  .tag.keepout { border-color: var(--keepout); color: var(--keepout); }
+  .tag.quiet { border-color: var(--quiet); color: var(--quiet); }
+  .tag.dim { border-color: var(--dim); color: var(--dim); }
+  .tag.sel { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 500; }
+  .tip {
+    position: absolute; left: 0; top: 0; pointer-events: none; max-width: 240px;
+    background: var(--ink); color: var(--bg); font-size: 12.5px; padding: 4px 8px; border-radius: 4px;
+  }
+  .tip b { font-family: var(--font-mono); font-weight: 500; }
+
+  .fallback { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--stage); }
+  .fallback img { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
+  .fallback p { padding: 8px 12px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); background: var(--surface); }
+  .fallback .tabs { display: flex; gap: 6px; padding: 8px 12px 0; }
+
+  button {
+    font: inherit; font-size: 13px; color: var(--ink); cursor: pointer;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 5px 10px;
+  }
+  button:hover { border-color: var(--accent); }
+  button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .toggles { display: grid; gap: 8px; }
+  .toggle { display: flex; gap: 9px; align-items: flex-start; cursor: pointer; }
+  .toggle input { margin: 3px 0 0; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+  .toggle span { min-width: 0; }
+  .toggle small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 1px; }
+
+  .part-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .part-ref { font-family: var(--font-mono); font-size: 22px; font-weight: 500; color: var(--accent); }
+  .part-name { font-weight: 600; min-width: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; color: var(--muted); }
+  .chip.dnp { color: var(--warn-ink); background: var(--warn-bg); border-color: var(--warn-line); }
+  .part-body { display: grid; gap: 10px; }
+  .part-body p { max-width: 60ch; }
+  .refs { display: flex; flex-wrap: wrap; gap: 5px; }
+  .refs button { font-family: var(--font-mono); font-size: 12px; padding: 3px 7px; }
+
+  /* ---- readouts ---- */
+  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+  .readout { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .readout .val { font-family: var(--font-mono); font-size: 20px; font-variant-numeric: tabular-nums; }
+  .readout .note { color: var(--muted); font-size: 12.5px; }
+
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr); gap: 16px; align-items: start; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th { text-align: left; font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  td.ref { font-family: var(--font-mono); white-space: nowrap; }
+  td.lcsc { font-family: var(--font-mono); white-space: nowrap; }
+  tr.dnp td { color: var(--muted); }
+  .bom td:nth-child(2) { min-width: 150px; }
+  .bom td:last-child { min-width: 200px; }
+  .foot { color: var(--muted); font-size: 13px; max-width: 80ch; }
+
+  @media (max-width: 860px) {
+    .bench, .two { grid-template-columns: minmax(0, 1fr); }
+    .stage { aspect-ratio: 4 / 3; }
+    .stage-mark { display: none; } /* the banner sits right above the stage at this width */
+    h1 { font-size: 22px; }
+  }
+  @media (prefers-reduced-motion: no-preference) { .bar i { transition: width 0.2s; } }
+
+  /* capture mode (#capture-iso etc.): the stage alone, for making the fallback images */
+  :root.capture .wrap > :not(.bench), :root.capture .inspector, :root.capture .stage-tools,
+  :root.capture .stage-hint, :root.capture .stage-mark { display: none; }
+  :root.capture .wrap { max-width: none; padding: 0; }
+  :root.capture .bench { display: block; }
+  :root.capture .stage { position: fixed; inset: 0; aspect-ratio: auto; border: 0; border-radius: 0; }
+</style>
+
+<div class="wrap">
+  <header class="titleblock">
+    <div>
+      <h1>GetMeFit beacon PCB</h1>
+      <p class="lede">The breadboard beacon on one custom board: nRF52840 module, accelerometer, two magnetometers, data flash, charger and battery. Orbit it and pick a part to see what it does and why it sits there.</p>
+    </div>
+    <div class="concept" role="note">Concept model, not for fabrication</div>
+  </header>
+
+  <section class="bench" aria-label="3D model and part details">
+    <div class="stage" id="stage">
+      <canvas id="canvas" tabindex="0" aria-label="3D model of the beacon board. Drag to orbit, scroll to zoom, click a part for details."></canvas>
+      <div class="labels" id="labels"></div>
+      <div class="stage-tools">
+        <button type="button" id="btn-reset">Reset view</button>
+        <button type="button" id="btn-top">Straight down</button>
+        <button type="button" id="btn-flip" aria-pressed="false">Flip to bottom</button>
+      </div>
+      <div class="stage-mark">Concept · not for fab</div>
+      <div class="stage-hint" id="hint">Drag to orbit · scroll or pinch to zoom · right-drag or two fingers to pan · click a part</div>
+      <div class="stage-status" id="status">
+        <div>Loading the 3D model…</div>
+        <div class="bar"><i id="bar"></i></div>
+      </div>
+      <div class="tip" id="tip" hidden></div>
+    </div>
+
+    <aside class="inspector">
+      <div class="card">
+        <h3>Show</h3>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="t-battery" checked><span><span class="swatch" style="background:var(--battery)"></span>Battery placeholder<small>400 mAh pouch under the board</small></span></label>
+          <label class="toggle"><input type="checkbox" id="t-keepout" checked><span><span class="swatch" style="background:var(--keepout)"></span>Antenna keep-out<small id="keepout-note">No copper or parts, on every layer</small></span></label>
+          <label class="toggle"><input type="checkbox" id="t-quiet" checked><span><span class="swatch" style="background:var(--quiet)"></span>Magnetometer quiet zone<small>Distances to the USB-C shell and the battery</small></span></label>
+          <label class="toggle"><input type="checkbox" id="t-dims"><span><span class="swatch" style="background:var(--dim)"></span>Board dimensions<small>Outline measurements on the model</small></span></label>
+        </div>
+      </div>
+
+      <div class="card" id="part-card" aria-live="polite">
+        <h3>Selected part</h3>
+        <div class="part-head"><span class="part-ref" id="p-ref"></span><span class="part-name" id="p-name"></span></div>
+        <div class="chips" id="p-chips"></div>
+        <div class="part-body">
+          <div><h3>What it does</h3><p id="p-role"></p></div>
+          <div><h3>Why it sits here</h3><p id="p-why"></p></div>
+        </div>
+        <h3>All parts with notes</h3>
+        <div class="refs" id="refs"></div>
+      </div>
+    </aside>
+  </section>
+
+  <section class="readouts" aria-label="Dimensions" id="readouts"></section>
+
+  <section class="two">
+    <div class="card">
+      <h2 id="clearances-title">Magnetometer clearances</h2>
+      <p class="foot">Shortest distance from the nearer magnetometer (U3 or U4) to each thing that could disturb a field of a few microtesla.</p>
+      <div class="scroll"><table id="clearances"><thead><tr><th>From the magnetometers to</th><th style="text-align:right">Distance</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Bill of materials</h2>
+      <div class="scroll"><table class="bom" id="bom"><thead><tr><th>Ref</th><th>Part</th><th>Package</th><th>LCSC</th><th>Purpose</th></tr></thead><tbody></tbody></table></div>
+      <p class="foot" id="bom-note"></p>
+    </div>
+  </section>
+
+  <p class="foot">Built from the tscircuit source in <span class="mono">GetMeFit/hardware/beacon-pcb</span>. Footprints come from LCSC and datasheets; the traces are straight from an autorouter and nobody has reviewed them. The module and battery are simple placeholder shapes. See <span class="mono">DESIGN-NOTES.md</span> for the decisions, open questions and known gaps.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function () {
+  "use strict";
+  const DATA = /*__VIEWER_DATA__*/null;
+  const $ = (id) => document.getElementById(id);
+  const mm = (n, d) => n.toFixed(d === undefined ? 1 : d) + " mm";
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+
+  /* ------------------------------------------------------------------ page content (no 3D needed) */
+  const partsByRef = new Map(DATA.parts.map((p) => [p.ref, p]));
+  let selectedRef = "U3";
+
+  function renderReadouts() {
+    const b = DATA.board, s = DATA.stackHeight, k = DATA.zones.antennaKeepout;
+    const items = [
+      ["Board outline", b.width + " × " + b.height + " mm", b.thickness + " mm thick, " + b.layers + " copper layers"],
+      ["Overall height", mm(s.total), "battery " + mm(s.battery) + " + board " + mm(b.thickness) + " + " + s.topPartRef + " " + mm(s.topParts)],
+      ["Antenna keep-out", k.w + " × " + k.h + " mm", "the whole antenna edge; Raytac's minimum is 12.4 × 3.8 mm"],
+      ["Sensor to USB-C shell", mm(DATA.clearances.find((c) => c.key === "usb").mm), "the largest steel part on the board"],
+    ];
+    for (const [label, val, note] of items) {
+      const d = el("div", "readout");
+      d.append(el("h3", "", label), el("div", "val", val), el("div", "note", note));
+      $("readouts").append(d);
+    }
+    $("keepout-note").textContent = k.w + " × " + k.h + " mm, no copper or parts on any layer";
+  }
+
+  function renderClearances() {
+    const tb = $("clearances").querySelector("tbody");
+    for (const c of DATA.clearances) {
+      const tr = el("tr");
+      tr.append(el("td", "", c.label), el("td", "num", mm(c.mm)));
+      tb.append(tr);
+    }
+  }
+
+  function renderBom() {
+    // One row per distinct part: identical passives share a row.
+    const groups = new Map();
+    for (const r of DATA.bom) {
+      const key = [r.part, r.mpn, r.package, r.lcsc, r.dnp].join("|");
+      if (!groups.has(key)) groups.set(key, { ...r, refs: [], purposes: [] });
+      const g = groups.get(key);
+      g.refs.push(r.ref);
+      if (!g.purposes.includes(r.purpose)) g.purposes.push(r.purpose);
+    }
+    const tb = $("bom").querySelector("tbody");
+    let fitted = 0;
+    for (const g of groups.values()) {
+      const tr = el("tr", g.dnp ? "dnp" : "");
+      const part = el("td");
+      part.append(document.createTextNode(g.part));
+      if (g.mpn && g.mpn !== "-") { part.append(el("br")); part.append(el("span", "mono", g.mpn)); }
+      const purpose = el("td", "", g.purposes.join("; "));
+      if (g.dnp) { purpose.append(document.createTextNode(" ")); purpose.append(el("span", "chip dnp", g.lcsc ? "not fitted" : "nothing to place")); }
+      tr.append(el("td", "ref", g.refs.join(", ")), part, el("td", "", g.package), el("td", "lcsc", g.lcsc || "–"), purpose);
+      tb.append(tr);
+      if (!g.dnp) fitted += g.refs.length;
+    }
+    $("bom-note").textContent = DATA.bom.length + " reference designators, " + fitted + " parts fitted. The same list, one row per designator, is in out/bom.csv.";
+  }
+
+  function renderPart(ref) {
+    const p = partsByRef.get(ref);
+    if (!p) return;
+    selectedRef = ref;
+    $("p-ref").textContent = p.ref;
+    $("p-name").textContent = p.part;
+    const chips = $("p-chips");
+    chips.textContent = "";
+    if (p.mpn && p.mpn !== "-") chips.append(el("span", "chip", p.mpn));
+    chips.append(el("span", "chip", p.package));
+    if (p.lcsc) chips.append(el("span", "chip", "LCSC " + p.lcsc));
+    chips.append(el("span", "chip", p.box.layer === "bottom" ? "bottom side" : "top side"));
+    if (p.dnp) chips.append(el("span", "chip dnp", p.lcsc ? "not fitted by default" : "nothing to place"));
+    $("p-role").textContent = p.role;
+    $("p-why").textContent = p.why;
+    for (const b of $("refs").children) b.setAttribute("aria-pressed", b.dataset.ref === ref ? "true" : "false");
+  }
+
+  function renderRefButtons(onPick) {
+    for (const p of DATA.parts) {
+      const b = el("button", "", p.ref);
+      b.type = "button";
+      b.dataset.ref = p.ref;
+      b.title = p.part;
+      b.addEventListener("click", () => onPick(p.ref));
+      $("refs").append(b);
+    }
+  }
+
+  renderReadouts();
+  renderClearances();
+  renderBom();
+  // The part notes work before (and without) the 3D model; the model adds the highlight.
+  let onPick = renderPart;
+  renderRefButtons((ref) => onPick(ref));
+  renderPart(selectedRef);
+
+  /* ------------------------------------------------------------------ 3D */
+  const stage = $("stage"), canvas = $("canvas"), labelsEl = $("labels"), tip = $("tip");
+  const capture = (location.hash.match(/^#capture-(iso|top|bottom)$/) || [])[1];
+  if (capture) document.documentElement.classList.add("capture");
+
+  function showFallback(reason) {
+    $("status").hidden = true;
+    canvas.hidden = true;
+    labelsEl.hidden = true;
+    document.querySelector(".stage-tools").hidden = true;
+    $("hint").hidden = true;
+    const views = [["views/iso.png", "3D view"], ["views/top.png", "Top side"], ["views/bottom.png", "Bottom side"]];
+    const box = el("div", "fallback");
+    const tabs = el("div", "tabs");
+    const img = el("img");
+    img.alt = "Pre-rendered view of the beacon board";
+    views.forEach(([src, name], i) => {
+      const b = el("button", "", name);
+      b.type = "button";
+      b.setAttribute("aria-pressed", i === 0 ? "true" : "false");
+      b.addEventListener("click", () => { img.src = src; for (const o of tabs.children) o.setAttribute("aria-pressed", o === b ? "true" : "false"); });
+      tabs.append(b);
+    });
+    img.src = views[0][0];
+    box.append(tabs, img, el("p", "", "Showing pre-rendered views: " + reason + " The part notes and the parts list still work."));
+    stage.append(box);
+  }
+
+  if (!window.THREE || !THREE.GLTFLoader || !THREE.OrbitControls) { showFallback("the 3D library did not load."); return; }
+
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: !!capture });
+  } catch (e) { showFallback("this browser could not start WebGL."); return; }
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(32, 1.6, 1, 2000);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.enableDamping = false;
+  controls.minDistance = 20;
+  controls.maxDistance = 320;
+
+  // Board frame (mm): x right, y up, z out of the top side. The exported GLB uses X = -x, Y = z, Z = y.
+  const P = (x, y, z) => new THREE.Vector3(-x, z, y);
+  const T = DATA.board.thickness / 2;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa7b3, 0.85));
+  const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.copy(P(-40, -60, 90)); scene.add(key);
+  const under = new THREE.DirectionalLight(0xffffff, 0.75); under.position.copy(P(40, 50, -90)); scene.add(under);
+
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const colors = {};
+  function readTheme() {
+    for (const n of ["stage", "accent", "keepout", "quiet", "battery", "dim"]) colors[n] = new THREE.Color(css("--" + n));
+    renderer.setClearColor(colors.stage, 1);
+  }
+  readTheme();
+
+  let needsRender = true;
+  const invalidate = () => { needsRender = true; };
+  controls.addEventListener("change", invalidate);
+
+  /* ---- labels: HTML tags pinned to 3D points ---- */
+  const tags = [];
+  function addTag(text, cls, pos, group) {
+    const e = el("div", "tag " + cls, text);
+    labelsEl.append(e);
+    const t = { e, pos, group };
+    tags.push(t);
+    return t;
+  }
+  const v = new THREE.Vector3();
+  function placeTags(w, h) {
+    for (const t of tags) {
+      const on = !t.group || t.group.visible;
+      v.copy(t.pos).project(camera);
+      if (!on || v.z < -1 || v.z > 1) { t.e.hidden = true; continue; }
+      t.e.hidden = false;
+      t.e.style.transform = "translate(" + ((v.x * 0.5 + 0.5) * w).toFixed(1) + "px," + ((-v.y * 0.5 + 0.5) * h).toFixed(1) + "px) translate(-50%,-50%)";
+    }
+  }
+
+  /* ---- overlay helpers ---- */
+  const overlayMaterials = [];
+  function lineMat(colorName, opts) {
+    const m = new THREE.LineBasicMaterial(Object.assign({ color: colors[colorName], depthTest: false, transparent: true }, opts));
+    overlayMaterials.push([m, colorName]);
+    return m;
+  }
+  function fillMat(colorName, opacity) {
+    const m = new THREE.MeshBasicMaterial({ color: colors[colorName], transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide });
+    overlayMaterials.push([m, colorName]);
+    return m;
+  }
+  function line(points, mat) {
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), mat);
+    l.renderOrder = 10;
+    return l;
+  }
+  /** Box between two board-frame corners. */
+  function slab(x0, x1, y0, y1, z0, z1, colorName, opacity) {
+    const g = new THREE.Group();
+    const geo = new THREE.BoxGeometry(x1 - x0, z1 - z0, y1 - y0);
+    const mesh = new THREE.Mesh(geo, fillMat(colorName, opacity));
+    mesh.position.copy(P((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2));
+    mesh.renderOrder = 5;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), lineMat(colorName, { opacity: 0.95 }));
+    edges.position.copy(mesh.position);
+    edges.renderOrder = 10;
+    g.add(mesh, edges);
+    return g;
+  }
+  /** Dimension line with end ticks at height z; tick direction (tx, ty) in the board plane. */
+  function dimension(ax, ay, bx, by, z, tx, ty, colorName) {
+    const g = new THREE.Group();
+    const m = lineMat(colorName, { opacity: 0.95 });
+    g.add(line([P(ax, ay, z), P(bx, by, z)], m));
+    g.add(line([P(ax - tx, ay - ty, z), P(ax + tx, ay + ty, z)], m));
+    g.add(line([P(bx - tx, by - ty, z), P(bx + tx, by + ty, z)], m));
+    return g;
+  }
+
+  /* ---- zones ---- */
+  const Z = DATA.zones;
+  const rect = (r) => ({ x0: r.x - r.w / 2, x1: r.x + r.w / 2, y0: r.y - r.h / 2, y1: r.y + r.h / 2 });
+
+  const keepoutGroup = new THREE.Group();
+  { const r = rect(Z.antennaKeepout);
+    keepoutGroup.add(slab(r.x0, r.x1, r.y0, r.y1, -T - 0.06, T + 0.06, "keepout", 0.38));
+    addTag("Antenna keep-out · " + Z.antennaKeepout.w + " × " + Z.antennaKeepout.h + " mm · all layers", "keepout", P(Z.antennaKeepout.x, r.y1 + 1.5, T + 7), keepoutGroup); }
+  scene.add(keepoutGroup);
+
+  const quietGroup = new THREE.Group();
+  { const r = rect(Z.quietZone), hy = DATA.board.height / 2;
+    quietGroup.add(slab(r.x0, r.x1, r.y0, r.y1, T + 0.02, T + 0.1, "quiet", 0.22));
+    addTag("Quiet zone", "quiet", P(Z.quietZone.x, 0, T + 7), quietGroup);
+    // Clearances as dimension lines stepped out from the front edge, drawing-style.
+    const shown = [["batteryBody", "battery body"], ["usb", "USB-C shell"], ["batteryTabs", "battery tabs"]];
+    const extension = lineMat("quiet", { opacity: 0.4 });
+    shown.forEach(([key, name], i) => {
+      const c = DATA.clearances.find((o) => o.key === key);
+      if (!c) return;
+      const text = name + " " + mm(c.mm);
+      if (Math.abs(c.to.y - c.from.y) > 0.01) {
+        // not a purely lengthwise distance: draw it point to point
+        const dx = c.to.x - c.from.x, dy = c.to.y - c.from.y, len = Math.hypot(dx, dy) || 1;
+        quietGroup.add(dimension(c.from.x, c.from.y, c.to.x, c.to.y, T + 1, (-dy / len) * 0.9, (dx / len) * 0.9, "quiet"));
+        addTag(text, "quiet", P((c.from.x + c.to.x) / 2, (c.from.y + c.to.y) / 2, T + 2.5), quietGroup);
+        return;
+      }
+      const yLine = -hy - 3.2 - i * 3.4;
+      quietGroup.add(dimension(c.from.x, yLine, c.to.x, yLine, T, 0, 0.9, "quiet"));
+      quietGroup.add(line([P(c.from.x, c.from.y, T), P(c.from.x, yLine, T)], extension));
+      quietGroup.add(line([P(c.to.x, c.to.y, T), P(c.to.x, yLine, T)], extension));
+      addTag(text, "quiet", P((c.from.x + c.to.x) / 2, yLine, T), quietGroup);
+    }); }
+  scene.add(quietGroup);
+
+  const dimsGroup = new THREE.Group();
+  { const hx = DATA.board.width / 2, hy = DATA.board.height / 2, off = 3.2;
+    dimsGroup.add(dimension(-hx, hy + off, hx, hy + off, T, 0, 0.9, "dim"));
+    dimsGroup.add(dimension(hx + off, -hy, hx + off, hy, T, 0.9, 0, "dim"));
+    addTag(DATA.board.width + " mm", "dim", P(-hx / 2, hy + off, T), dimsGroup);
+    addTag(DATA.board.height + " mm", "dim", P(hx + off, 0, T), dimsGroup);
+    dimsGroup.visible = false; }
+  scene.add(dimsGroup);
+
+  /* ---- picking and highlighting ---- */
+  const pickMeshes = [];
+  const pickMat = new THREE.MeshBasicMaterial({ visible: false });
+  const boxOfRef = new Map();
+  function addPick(ref, box) {
+    const size = new THREE.Vector3(); box.getSize(size);
+    const centre = new THREE.Vector3(); box.getCenter(centre);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(size.x, 0.4), Math.max(size.y, 0.3), Math.max(size.z, 0.4)), pickMat);
+    m.position.copy(centre);
+    m.userData.ref = ref;
+    scene.add(m);
+    m.updateMatrixWorld(true); // pickable straight away, before the next rendered frame
+    pickMeshes.push(m);
+    if (ref) boxOfRef.set(ref, box);
+  }
+  function highlighter(colorName, opacity) {
+    const g = new THREE.Group();
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const fill = new THREE.Mesh(geo, fillMat(colorName, opacity));
+    const edge = new THREE.LineSegments(new THREE.EdgesGeometry(geo), lineMat(colorName, { opacity: 1 }));
+    fill.renderOrder = 6; edge.renderOrder = 11;
+    g.add(fill, edge);
+    g.visible = false;
+    scene.add(g);
+    return g;
+  }
+  const selBox = highlighter("accent", 0.22);
+  const hoverBox = highlighter("accent", 0.1);
+  function fit(group, ref) {
+    const box = boxOfRef.get(ref);
+    if (!box) { group.visible = false; return; }
+    const size = new THREE.Vector3(); box.getSize(size);
+    group.scale.set(size.x + 0.5, size.y + 0.5, size.z + 0.5);
+    box.getCenter(group.position);
+    group.visible = true;
+  }
+  const selTag = addTag("", "sel", new THREE.Vector3(), null);
+
+  let model = null, batteryNode = null;
+  function select(ref) {
+    renderPart(ref);
+    if (!model) return;
+    if (ref === "BT1" && batteryNode && !batteryNode.visible) { $("t-battery").checked = true; setBattery(true); }
+    fit(selBox, ref);
+    const box = boxOfRef.get(ref);
+    if (box) {
+      const c = new THREE.Vector3(); box.getCenter(c);
+      const above = partsByRef.get(ref).box.layer !== "bottom";
+      selTag.pos.set(c.x, above ? box.max.y + 2.2 : box.min.y - 2.2, c.z);
+      selTag.e.textContent = ref;
+    }
+    invalidate();
+  }
+  onPick = select;
+
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  function refAt(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObjects(pickMeshes, false);
+    for (const h of hits) {
+      const ref = h.object.userData.ref;
+      if (ref === "BT1" && batteryNode && !batteryNode.visible) continue;
+      return ref; // null when the bare board is in front
+    }
+    return null;
+  }
+
+  let hoverRef = null, down = null;
+  canvas.addEventListener("pointerdown", (e) => { down = { x: e.clientX, y: e.clientY }; tip.hidden = true; });
+  canvas.addEventListener("pointerup", (e) => {
+    if (!down) return;
+    const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    down = null;
+    if (moved > 5) return;
+    const ref = refAt(e.clientX, e.clientY);
+    if (ref) select(ref);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (down || e.pointerType === "touch") return;
+    const ref = refAt(e.clientX, e.clientY);
+    canvas.classList.toggle("pointing", !!ref);
+    if (ref !== hoverRef) {
+      hoverRef = ref;
+      if (ref && ref !== selectedRef) fit(hoverBox, ref); else hoverBox.visible = false;
+      invalidate();
+    }
+    if (ref) {
+      const p = partsByRef.get(ref), r = stage.getBoundingClientRect();
+      tip.textContent = "";
+      tip.append(el("b", "", p.ref), document.createTextNode("  " + p.part));
+      tip.hidden = false;
+      const x = Math.min(e.clientX - r.left + 14, r.width - tip.offsetWidth - 8);
+      const y = Math.min(e.clientY - r.top + 16, r.height - tip.offsetHeight - 8);
+      tip.style.transform = "translate(" + x + "px," + y + "px)";
+    } else tip.hidden = true;
+  });
+  canvas.addEventListener("pointerleave", () => { tip.hidden = true; hoverRef = null; hoverBox.visible = false; canvas.classList.remove("pointing"); invalidate(); });
+
+  /* ---- views ---- */
+  const VIEWS = {
+    iso: { pos: P(-22, -74, 56), up: [0, 1, 0] },
+    top: { pos: P(0, -0.01, 112), up: [0, 1, 0] },
+    bottom: { pos: P(-14, -52, -88), up: [0, 1, 0] },
+  };
+  let flipped = false;
+  function setView(name) {
+    const view = VIEWS[name];
+    camera.up.set(view.up[0], view.up[1], view.up[2]);
+    camera.position.copy(view.pos);
+    controls.target.set(0, name === "bottom" ? -3 : 0, 0);
+    controls.update();
+    invalidate();
+  }
+  function setFlip(on) {
+    flipped = on;
+    $("btn-flip").setAttribute("aria-pressed", on ? "true" : "false");
+    $("btn-flip").textContent = on ? "Flip to top" : "Flip to bottom";
+    setView(on ? "bottom" : "iso");
+  }
+  $("btn-reset").addEventListener("click", () => setFlip(false));
+  $("btn-top").addEventListener("click", () => { flipped = false; $("btn-flip").setAttribute("aria-pressed", "false"); $("btn-flip").textContent = "Flip to bottom"; setView("top"); });
+  $("btn-flip").addEventListener("click", () => setFlip(!flipped));
+
+  /* ---- toggles ---- */
+  function setBattery(on) {
+    if (batteryNode) batteryNode.visible = on;
+    if (!on && selectedRef === "BT1") selBox.visible = false;
+    else if (on && selectedRef === "BT1") fit(selBox, "BT1");
+    invalidate();
+  }
+  $("t-battery").addEventListener("change", (e) => setBattery(e.target.checked));
+  $("t-keepout").addEventListener("change", (e) => { keepoutGroup.visible = e.target.checked; invalidate(); });
+  $("t-quiet").addEventListener("change", (e) => { quietGroup.visible = e.target.checked; invalidate(); });
+  $("t-dims").addEventListener("change", (e) => { dimsGroup.visible = e.target.checked; invalidate(); });
+
+  /* ---- render loop (only when something changed) ---- */
+  function resize() {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    invalidate();
+  }
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(stage); else window.addEventListener("resize", resize);
+  resize();
+  setView(capture || "iso");
+
+  function frame() {
+    if (needsRender) {
+      needsRender = false;
+      selTag.e.style.visibility = selBox.visible ? "" : "hidden";
+      renderer.render(scene, camera);
+      placeTags(stage.clientWidth, stage.clientHeight);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ---- theme changes ---- */
+  function retheme() {
+    readTheme();
+    for (const [m, name] of overlayMaterials) m.color.copy(colors[name]);
+    invalidate();
+  }
+  new MutationObserver(retheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  if (window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", retheme); else if (mq.addListener) mq.addListener(retheme);
+  }
+
+  /* ---- self-test (#selftest): click the middle of every part and check the right one is picked ---- */
+  function selfTest() {
+    const r = canvas.getBoundingClientRect(), results = [];
+    for (const p of DATA.parts) {
+      const bottom = p.box.layer === "bottom";
+      camera.position.copy(P(p.box.x, p.box.y - 0.01, bottom ? -112 : 112));
+      controls.target.copy(P(p.box.x, p.box.y, 0));
+      controls.update();
+      camera.updateMatrixWorld(true);
+      const got = refAt(r.left + r.width / 2, r.top + r.height / 2);
+      results.push(p.ref + (got === p.ref ? ":ok" : ":GOT_" + got));
+    }
+    const out = el("pre", "", "SELFTEST " + results.join(" "));
+    out.id = "selftest";
+    document.body.append(out);
+    setFlip(false);
+  }
+
+  /* ---- load the model ---- */
+  // GLTFLoader would decode the board textures with fetch() on blob: URLs; plain <img> decoding
+  // is the safer path inside a sandboxed frame, so hide createImageBitmap while the file parses.
+  const realCreateImageBitmap = window.createImageBitmap;
+  try { window.createImageBitmap = undefined; } catch (e) { /* read-only: keep the default path */ }
+  const restoreBitmap = () => { try { window.createImageBitmap = realCreateImageBitmap; } catch (e) { /* ignore */ } };
+
+  let settled = false;
+  const timeout = setTimeout(() => { if (!settled) { settled = true; restoreBitmap(); showFallback("the 3D model took too long to load."); } }, 45000);
+
+  // beacon.gltf.json is out/beacon.glb in glTF's JSON form (the host does not serve .glb files).
+  new THREE.GLTFLoader().load(
+    "beacon.gltf.json",
+    (gltf) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      restoreBitmap();
+      model = gltf.scene;
+      scene.add(model);
+      model.updateMatrixWorld(true);
+      batteryNode = model.getObjectByName("BT1");
+
+      // The bare board blocks picks from the far side.
+      addPick(null, new THREE.Box3(P(DATA.board.width / 2, -DATA.board.height / 2, -T), P(-DATA.board.width / 2, DATA.board.height / 2, T)));
+      for (const p of DATA.parts) {
+        const node = model.getObjectByName(p.ref);
+        let box;
+        if (node) box = new THREE.Box3().setFromObject(node);
+        if (!box || box.isEmpty()) {
+          const b = p.box, through = /^H\d+$/.test(p.ref);
+          const z0 = through ? -T : b.layer === "bottom" ? -T - 0.35 : T;
+          const z1 = through ? T : b.layer === "bottom" ? -T : T + 0.35;
+          box = new THREE.Box3().setFromPoints([P(b.x - b.w / 2, b.y - b.h / 2, z0), P(b.x + b.w / 2, b.y + b.h / 2, z1)]);
+        }
+        addPick(p.ref, box);
+      }
+      $("status").hidden = true;
+      select(selectedRef);
+      invalidate();
+      if (capture) { for (const g of [keepoutGroup, quietGroup, selBox]) g.visible = false; selTag.e.hidden = true; labelsEl.hidden = true; document.title = "captured"; }
+      if (location.hash === "#selftest") selfTest();
+    },
+    (ev) => { if (ev.lengthComputable) $("bar").style.width = Math.round((ev.loaded / ev.total) * 100) + "%"; },
+    () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      restoreBitmap();
+      showFallback("the 3D model could not be loaded.");
+    }
+  );
+})();
+</script>
