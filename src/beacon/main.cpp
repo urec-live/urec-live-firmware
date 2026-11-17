@@ -36,6 +36,7 @@
 #include "rep_counter.h"
 #include "rep_validator.h"
 #include "tuning_console.h"
+#include "uptime.h"
 #include "weight_sensing.h"
 
 // Console text for whoever listens: the USB monitor and/or a phone (console_out.h).
@@ -661,7 +662,7 @@ void printStatus() {
   Console.print(F("battery "));
   printBattery(readBatteryMv(), usbPowered());
   Console.printf(", reported every %lu s\n", static_cast<unsigned long>(BEACON_STATUS_INTERVAL_MS / 1000));
-  ble_console::printStatus(Console, millis());
+  ble_console::printStatus(Console, uptimeMs());
   g_weight.printSummary();
 }
 
@@ -685,7 +686,7 @@ void onSettingsChanged(bool needsRecalibration) {
   g_counter.setConfig(counterConfig(g_settings));
   g_validator.setConfig(validatorConfig(g_settings));  // chk on/off itself applies from the next set
   if (needsRecalibration) {
-    calibrate(millis());
+    calibrate(uptimeMs());
   } else {
     if (g_cal.measured) {  // keep the last resting reading, re-derive the thresholds
       g_cal.valid = checkRest(g_settings, g_cal.restMg) == nullptr;
@@ -697,13 +698,13 @@ void onSettingsChanged(bool needsRecalibration) {
 }
 
 void onRecalibrate() {
-  calibrate(millis());
+  calibrate(uptimeMs());
   printStatus();
 }
 
 void onResetCount() {
   g_counter.endSet();
-  syncRecorder(millis());
+  syncRecorder(uptimeMs());
   g_repeatPending = false;
   g_setReps = 0;
   syncArm(true);
@@ -777,17 +778,17 @@ void setup() {
   const bool bleOk = g_adv.begin(BEACON_TX_POWER_DBM, BEACON_ADV_INTERVAL_MS);
   if (!bleOk) LOG("[err] Bluefruit did not start\n");
 #if BEACON_BLE_CONSOLE
-  if (bleOk && !ble_console::begin(millis())) LOG("[err] Bluetooth console did not start\n");
+  if (bleOk && !ble_console::begin(uptimeMs())) LOG("[err] Bluetooth console did not start\n");
 #endif
   g_counter.seedSetSeq(randomByte());  // random, so a reboot does not repeat the last set number
   // After Bluefruit: the taught weights live in its flash file system, and flash writes only
   // complete while the SoftDevice runs. The boot id goes with every stored set (set_store.h).
   const uint16_t bootId = static_cast<uint16_t>((randomByte() << 8) | randomByte());
-  g_weight.begin(Wire, g_imu, bleOk, millis(), bootId);
+  g_weight.begin(Wire, g_imu, bleOk, uptimeMs(), bootId);
 
   delay(500);  // let hands get off the board after a reset
-  calibrate(millis());
-  g_lastHousekeepingMs = millis();
+  calibrate(uptimeMs());
+  g_lastHousekeepingMs = uptimeMs();
   g_hostConnected = Serial;  // a monitor that is already open gets the banner once, here
   if (g_hostConnected) {
     ConsoleOut::Only usbOnly(Console, ConsoleOut::kUsb);
@@ -796,7 +797,7 @@ void setup() {
 }
 
 void loop() {
-  uint32_t now = millis();
+  uint32_t now = uptimeMs();
   const bool usb = usbPowered();
 
   // Sleep until the earliest deadline (or until INT1 rises).
@@ -819,7 +820,7 @@ void loop() {
   if (g_serviceNow) wait = 0;
 
   const bool edge = xSemaphoreTake(g_intSem, ticksCeil(wait)) == pdTRUE;
-  now = millis();
+  now = uptimeMs();
 
   if (edge || g_serviceNow) {
     g_serviceNow = false;

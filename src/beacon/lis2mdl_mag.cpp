@@ -1,5 +1,7 @@
 #include "lis2mdl_mag.h"
 
+#include "uptime.h"
+
 namespace {
 // Register map (LIS2MDL datasheet DocID030621, section 8)
 const uint8_t kWhoAmI = 0x4F;  // reads 0x40
@@ -45,7 +47,7 @@ bool Lis2mdlMag::configure() {
 // its own since the last set, which resets the chip to idle with BDU and offset cancellation off.
 bool Lis2mdlMag::wake() {
   if (wire_ == nullptr || !configure() || !write(kCfgRegA, kContinuous50Hz)) return false;
-  readyAtMs_ = millis() + kSettleMs;  // no blocking: read() reports "no sample" until then
+  readyAtMs_ = uptimeMs() + kSettleMs;  // no blocking: read() reports "no sample" until then
   return true;
 }
 
@@ -56,7 +58,7 @@ void Lis2mdlMag::sleep() {
 // One burst of CFG_REG_A (0x60) to TEMP_OUT_H (0x6F): the configuration, the status, the field and
 // the temperature, all from the same moment.
 bool Lis2mdlMag::read(int16_t b[3], int16_t* tempC10) {
-  if (wire_ == nullptr || static_cast<int32_t>(millis() - readyAtMs_) < 0) return false;
+  if (wire_ == nullptr || static_cast<int32_t>(uptimeMs() - readyAtMs_) < 0) return false;
   uint8_t r[16];
   if (!readRegs(kCfgRegA, r, sizeof(r))) return false;
   if (r[0] != kContinuous50Hz || (r[kCfgRegC - kCfgRegA] & kBdu) == 0) {

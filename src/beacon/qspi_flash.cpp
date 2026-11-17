@@ -1,5 +1,7 @@
 #include "qspi_flash.h"
 
+#include "uptime.h"
+
 #include <Arduino.h>
 #include <nrfx_qspi.h>
 #include <string.h>
@@ -118,9 +120,9 @@ void QspiFlash::close() {
 }
 
 bool QspiFlash::waitReady(uint32_t timeoutMs) {
-  const uint32_t start = millis();
+  const uint32_t start = uptimeMs();
   while (nrfx_qspi_mem_busy_check() != NRFX_SUCCESS) {
-    if (millis() - start > timeoutMs) return false;
+    if (uptimeMs() - start > timeoutMs) return false;
     yield();
   }
   return true;

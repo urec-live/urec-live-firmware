@@ -12,6 +12,7 @@
 #include "set_store.h"
 #include "set_store_format.h"
 #include "tmag5273_mag.h"
+#include "uptime.h"
 #include "weight_model.h"
 #include "weight_pipeline.h"
 
@@ -476,7 +477,7 @@ void WeightSensing::finishSet(uint32_t now, uint32_t lastEventMs, uint8_t setSeq
 // (set_store_format.h). `dumpall` prints it back exactly as `dump` would have.
 void WeightSensing::storeSet(uint8_t setSeq, uint32_t now) {
   if (!s_store.ready()) return;
-  const uint32_t startMs = millis();
+  const uint32_t startMs = uptimeMs();
   char line[128];
   uint32_t metaBytes = 0;
   DumpCursor c;
@@ -522,7 +523,7 @@ void WeightSensing::storeSet(uint8_t setSeq, uint32_t now) {
   }
   LOG("[store] set %u saved: %u sets, %lu of %lu KB (%lu ms)\n", setSeq, s_store.count(),
       static_cast<unsigned long>((s_store.usedBytes() + 1023) / 1024),
-      static_cast<unsigned long>(s_store.capacity() / 1024), static_cast<unsigned long>(millis() - startMs));
+      static_cast<unsigned long>(s_store.capacity() / 1024), static_cast<unsigned long>(uptimeMs() - startMs));
 }
 
 // "[weight] set 143: TMAG5273 ~50 (7/8 reps) | LIS2MDL ~50 (8/8 reps) | lift 27 cm"
@@ -619,7 +620,7 @@ void WeightSensing::printStatus() const {
     }
   }
   if (recording_) {
-    Console.printf("recording: %.1f s, %u samples\n", (millis() - recordStartMs_) / 1000.0f,
+    Console.printf("recording: %.1f s, %u samples\n", (uptimeMs() - recordStartMs_) / 1000.0f,
                   static_cast<unsigned>(s_rec.size()));
   } else if (inSet_ && blocked_ != nullptr) {
     Console.printf("this set is not weighed: %s\n", blocked_);

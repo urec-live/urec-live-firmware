@@ -1,5 +1,7 @@
 #include "lis3dh_motion.h"
 
+#include "uptime.h"
+
 namespace {
 // Register map (LIS3DH datasheet, section 8)
 const uint8_t kWhoAmI = 0x0F;      // reads 0x33
@@ -106,13 +108,13 @@ bool Lis3dhMotion::readSample(Sample* s, bool* fresh) {
 }
 
 bool Lis3dhMotion::waitSample(Sample* s, uint32_t timeoutMs) {
-  const uint32_t start = millis();
+  const uint32_t start = uptimeMs();
   do {
     bool fresh = false;
     if (!readSample(s, &fresh)) return false;
     if (fresh) return true;
     delay(4);
-  } while (millis() - start < timeoutMs);
+  } while (uptimeMs() - start < timeoutMs);
   return false;
 }
 

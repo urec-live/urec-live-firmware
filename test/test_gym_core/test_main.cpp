@@ -16,6 +16,7 @@
 #include "rep_counter.h"
 #include "rep_validator.h"
 #include "set_store_format.h"
+#include "tick_clock.h"
 #include "weight_model.h"
 #include "weight_pipeline.h"
 
@@ -1588,6 +1589,31 @@ void test_val_verdict_names() {
   TEST_ASSERT_FALSE(moveCounted(MoveVerdict::Held));
 }
 
+// ---------------------------------------------------------------- tick clock
+
+void test_tick_clock_wraps_at_2_32() {
+  // The core's millis() at the 32-bit tick wrap goes 4,194,303,999 -> 0; this one carries on.
+  const uint32_t before = msFromTicks(0, 0xFFFFFFFFu, 1024);
+  const uint32_t after = msFromTicks(1, 0, 1024);
+  TEST_ASSERT_EQUAL_UINT32(4194303999u, before);
+  TEST_ASSERT_EQUAL_UINT32(4194304000u, after);
+  uint32_t prev = msFromTicks(0, 0xFFFFF000u, 1024);  // 4 s either side of the tick wrap: never a jump
+  bool steady = true;
+  for (uint32_t k = 0xFFFFF001u; k != 0x00001000u; k++) {
+    const uint32_t v = msFromTicks(k < 0x80000000u ? 1 : 0, k, 1024);
+    steady = steady && static_cast<uint32_t>(v - prev) <= 1;
+    prev = v;
+  }
+  TEST_ASSERT_TRUE(steady);
+  // It wraps at 2^32 ms (4,398,046,511,104 ticks), where unsigned timer arithmetic expects it.
+  const uint64_t atWrap = 4398046511104ull;
+  const uint32_t a = msFromTicks(static_cast<uint32_t>((atWrap - 2) >> 32), static_cast<uint32_t>(atWrap - 2), 1024);
+  const uint32_t b = msFromTicks(static_cast<uint32_t>((atWrap + 2) >> 32), static_cast<uint32_t>(atWrap + 2), 1024);
+  TEST_ASSERT_TRUE(a >= 0xFFFFFFFDu);
+  TEST_ASSERT_TRUE(b <= 2u);
+  TEST_ASSERT_TRUE(static_cast<uint32_t>(b - a) <= 4u);
+}
+
 void setup() {
   delay(5000);  // let the board's USB serial come up (and the test runner attach) before Unity prints
   UNITY_BEGIN();
@@ -1670,6 +1696,7 @@ void setup() {
   RUN_TEST(test_val_rocking_still_counts);
   RUN_TEST(test_val_flipped_beacon_tilted);
   RUN_TEST(test_val_verdict_names);
+  RUN_TEST(test_tick_clock_wraps_at_2_32);
   UNITY_END();
 }
 
