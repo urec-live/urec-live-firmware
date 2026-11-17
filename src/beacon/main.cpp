@@ -50,6 +50,10 @@ const uint32_t kConsoleTickMs = 50;
 const uint32_t kDumpTickMs = 5;  // while a CSV dump drains to the USB host
 const uint8_t kCalSamples = 32;
 const uint8_t kDriftSamples = 8;
+// A resting reading that moved is only acted on when a second look, this much later, finds it in
+// the same place (within kDriftAgreeMg): see checkDrift().
+const uint32_t kDriftConfirmMs = 1500;  // i.e. at the next housekeeping tick
+const int kDriftAgreeMg = 16;
 
 gym::RepCounterConfig counterConfig(const MotionSettings& s) {
   gym::RepCounterConfig c;
@@ -120,6 +124,8 @@ uint32_t g_lastStatusMs = 0;
 uint32_t g_lastHousekeepingMs = 0;
 uint32_t g_lastCalAttemptMs = 0;
 uint32_t g_lastDriftCheckMs = 0;
+bool g_driftSeen = false;   // the last drift check found the resting reading moved: not confirmed yet
+int16_t g_driftMg = 0;      // ... to this reading on the motion axis
 bool g_hostConnected = false;  // a serial monitor has the USB port open
 bool g_consoleAdvFailed = false;  // logged once, not on every retry
 
@@ -415,7 +421,10 @@ void deriveSpecs() {
 
 // Measures the beacon at rest. Thresholds are relative to this reading, so a beacon that was
 // bumped or tilted keeps counting after it recalibrates (the paper lost reps exactly that way).
-bool calibrate(uint32_t now) {
+// keepIfMoving: a recalibration for drift. If the beacon turns out to be moving, the calibration
+// in use stays; without it the beacon stops counting until a retry finds it still.
+bool calibrate(uint32_t now, bool keepIfMoving = false) {
+  g_driftSeen = false;
   g_counter.endSet();
   syncRecorder(now);  // a set cut short by calibration is not weighed
   g_repeatPending = false;
@@ -430,6 +439,7 @@ bool calibrate(uint32_t now) {
   int16_t p2p[3];
   Calibration cal = {};
   const char* why = nullptr;
+  bool moving = false;
   // Rewrite the whole sensor configuration first: if the LIS3DH lost power (a loose VIN/GND
   // jumper on a moving stack) it came back powered down, and only this brings it back.
   if (!g_imu.begin(Wire, BEACON_LIS3DH_ADDR)) {
@@ -439,6 +449,7 @@ bool calibrate(uint32_t now) {
   } else if (p2p[0] > BEACON_STILL_P2P_MG || p2p[1] > BEACON_STILL_P2P_MG ||
              p2p[2] > BEACON_STILL_P2P_MG) {
     why = "beacon is moving - keep it still";
+    moving = true;
   } else {
     cal.measured = true;
     cal.axis = chooseAxis(g_settings, mean);
@@ -446,6 +457,14 @@ bool calibrate(uint32_t now) {
     memcpy(g_restMg, mean, sizeof(mean));  // the rep check's gravity
     cal.restMg = static_cast<uint16_t>(abs(mean[cal.axis]));
     why = checkRest(g_settings, cal.restMg);
+  }
+  if (moving && keepIfMoving && g_cal.valid) {
+    // The sensor answers and the calibration in use still counts reps: someone has started to
+    // move the machine. Keep it, arm again (begin() above cleared both interrupts), and let the
+    // drift check look again later.
+    LOG("[cal] not recalibrated: the beacon is moving - keeping the calibration in use\n");
+    syncArm(true);
+    return false;
   }
   cal.valid = why == nullptr;
   g_cal = cal;
@@ -462,6 +481,11 @@ bool calibrate(uint32_t now) {
 }
 
 // While idle: if the beacon now rests differently than when it was calibrated, recalibrate.
+//
+// "Still, but not where it was calibrated" is also what the first moments of a lift look like: the
+// acceleration can hold within the stillness limit for the 0.16 s this takes. A beacon that was
+// bumped or tilted reads the same a moment later; a lift does not. So the first such reading is
+// only remembered, and the recalibration waits for a second look to agree with it.
 void checkDrift(uint32_t now) {
   g_lastDriftCheckMs = now;
   if (!g_cal.valid) return;
@@ -475,14 +499,24 @@ void checkDrift(uint32_t now) {
     return;
   }
   if (p2p[0] > BEACON_STILL_P2P_MG || p2p[1] > BEACON_STILL_P2P_MG || p2p[2] > BEACON_STILL_P2P_MG) {
+    g_driftSeen = false;
     return;  // someone is moving the machine; check again later
   }
-  memcpy(g_restMg, mean, sizeof(mean));  // still: the rep check's latest gravity, even without a recalibration
-  const int drift = abs(mean[g_cal.axis] - g_cal.meanMg[g_cal.axis]);
-  if (drift > BEACON_DRIFT_MG) {
-    LOG("[cal] resting reading moved %d mg - recalibrating\n", drift);
-    calibrate(now);
+  const int16_t reading = mean[g_cal.axis];
+  const int drift = abs(reading - g_cal.meanMg[g_cal.axis]);
+  if (drift <= BEACON_DRIFT_MG) {
+    g_driftSeen = false;
+    memcpy(g_restMg, mean, sizeof(mean));  // still, at rest: the rep check's latest gravity
+    return;
   }
+  if (!g_driftSeen || abs(reading - g_driftMg) > kDriftAgreeMg) {
+    g_driftSeen = true;
+    g_driftMg = reading;
+    g_lastDriftCheckMs = now - BEACON_DRIFT_CHECK_MS + kDriftConfirmMs;  // look again soon
+    return;
+  }
+  LOG("[cal] resting reading moved %d mg - recalibrating\n", drift);
+  calibrate(now, true);
 }
 
 // ---------------------------------------------------------------- events
@@ -543,8 +577,10 @@ void housekeeping(uint32_t now) {
     if (elapsed(now, g_lastCalAttemptMs, BEACON_CAL_RETRY_MS)) calibrate(now);
     return;
   }
-  if (!g_counter.setActive() && now - g_lastDriftCheckMs >= BEACON_DRIFT_CHECK_MS) checkDrift(now);
-  if (!g_counter.setActive()) g_weight.housekeeping(now);
+  // Not during a session, which starts at the lift-start wake, before the first rep is counted:
+  // the drift check blocks for 0.2 s of samples the rep check needs, and a lift is not drift.
+  if (!g_counter.active() && now - g_lastDriftCheckMs >= BEACON_DRIFT_CHECK_MS) checkDrift(now);
+  if (!g_counter.active()) g_weight.housekeeping(now);
 }
 
 // ---------------------------------------------------------------- console
