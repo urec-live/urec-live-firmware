@@ -10,6 +10,7 @@ namespace {
 const int kAuthUnavailable = -1000;
 const uint32_t kSignInRetryMs = 30000;
 const uint32_t kRenewBeforeExpiryS = 600;  // renew 10 min before the 1 h token expires
+const uint32_t kExpiryMarginS = 60;        // and stop using it 1 min before it does
 }  // namespace
 
 bool FirebaseClient::configured() const { return strlen(FIREBASE_DB_URL) > 0; }
@@ -27,8 +28,12 @@ bool FirebaseClient::ensureToken(bool force) {
   const uint32_t now = millis();
   const bool fresh = token_.length() > 0 && now - tokenIssuedMs_ < tokenUsableMs_;
   if (fresh && !force) return true;
+  // Due for renewal but not expired yet: if renewing fails, the token is used until it expires, so a
+  // short sign-in outage does not stop the uploads 10 minutes early. Not after a 401 (force): the
+  // database has refused it.
+  const bool stillValid = !force && token_.length() > 0 && now - tokenIssuedMs_ < tokenValidMs_;
   // At most one sign-in per kSignInRetryMs, whatever asks for it.
-  if (signInAttempted_ && now - lastSignInMs_ < kSignInRetryMs) return fresh;
+  if (signInAttempted_ && now - lastSignInMs_ < kSignInRetryMs) return fresh || stillValid;
   signInAttempted_ = true;
   lastSignInMs_ = now;
 
@@ -40,7 +45,7 @@ bool FirebaseClient::ensureToken(bool force) {
   configureHttp(http);
   const String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=") +
                      FIREBASE_API_KEY;
-  if (!http.begin(tls, url)) return false;
+  if (!http.begin(tls, url)) return stillValid;
   http.addHeader("Content-Type", "application/json");
 
   JsonDocument req;
@@ -55,7 +60,7 @@ bool FirebaseClient::ensureToken(bool force) {
     Serial.printf("[firebase] sign-in failed: HTTP %d %s\n", code,
                   code > 0 ? http.getString().c_str() : http.errorToString(code).c_str());
     http.end();
-    return false;
+    return stillValid;
   }
   JsonDocument filter;
   filter["idToken"] = true;
@@ -65,13 +70,16 @@ bool FirebaseClient::ensureToken(bool force) {
   http.end();
   if (err || !resp["idToken"].is<const char*>()) {
     Serial.println("[firebase] sign-in: unexpected response");
-    return false;
+    return stillValid;
   }
   token_ = resp["idToken"].as<String>();
-  long expiresIn = resp["expiresIn"].as<String>().toInt();  // a string, e.g. "3600"
+  const long lifetimeS = resp["expiresIn"].as<String>().toInt();  // a string, e.g. "3600"
+  long expiresIn = lifetimeS;
   if (expiresIn <= static_cast<long>(kRenewBeforeExpiryS)) expiresIn = kRenewBeforeExpiryS + 60;
   tokenIssuedMs_ = millis();
   tokenUsableMs_ = static_cast<uint32_t>(expiresIn - kRenewBeforeExpiryS) * 1000u;
+  tokenValidMs_ =
+      lifetimeS > static_cast<long>(kExpiryMarginS) ? static_cast<uint32_t>(lifetimeS - kExpiryMarginS) * 1000u : 0;
   Serial.printf("[firebase] signed in as %s\n", FIREBASE_EMAIL);
   return true;
 }

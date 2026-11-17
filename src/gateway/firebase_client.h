@@ -30,6 +30,7 @@ class FirebaseClient {
   // Elapsed-time bookkeeping (now - start >= duration), safe across millis() wrap-around.
   uint32_t tokenIssuedMs_ = 0;
   uint32_t tokenUsableMs_ = 0;  // renew once the token is this old
+  uint32_t tokenValidMs_ = 0;   // ... and stop using it once it is this old (it expires)
   uint32_t lastSignInMs_ = 0;
   bool signInAttempted_ = false;
 };
