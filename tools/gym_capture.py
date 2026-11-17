@@ -73,9 +73,11 @@ SET_ID_HELP = "C1, T1-T8, X1-X12, R1-R8, E1-E6, B-prefixed for machine B, + b fo
 OVERRIDE_KEYS = ("reps", "w")
 
 # Beacon lines (src/beacon/main.cpp, weight_sensing.cpp).
-REP_RE = re.compile(r"^\[rep\] (\d+)\s+\(set seq (\d+)\)")
+# "[rep] 2  (set seq 7; reps 1-2 counted together once they matched)" when the rep check counts the
+# first two reps at once; "set woken" in the status while a lift has started but no rep counted yet.
+REP_RE = re.compile(r"^\[rep\] (\d+)\s+\(set seq (\d+)[;)]")
 SET_DONE_RE = re.compile(r"^\[set\] done: (\d+) reps")
-STATUS_RE = re.compile(r"^phase \w+, reps (\d+), set (active|idle) \(seq (\d+)\)")
+STATUS_RE = re.compile(r"^phase \w+, reps (\d+), set (active|woken|idle) \(seq (\d+)\)")
 DUMP_START_RE = re.compile(r"^# w8 set=(\d+) reps=(\d+) samples=(\d+)")
 DUMP_ROW_RE = re.compile(r"^-?\d+(?:,-?\d+){10}$")
 DUMP_HEADER = "t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid"
