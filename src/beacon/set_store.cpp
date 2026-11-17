@@ -5,6 +5,11 @@
 namespace {
 
 const uint32_t kSector = QspiFlash::kSectorBytes;
+// A record starts only where its header and at least one word of its body fit in the sector.
+const uint32_t kMinSectorTail = gym::kStoreHeaderBytes + 4;
+// How far behind an erased stretch the boot scan looks for the next record: more than the largest
+// record (60 s of rows is 63 KB), so a whole abandoned record that left nothing is covered.
+const uint32_t kMaxGapSectors = 24;
 const char kColumnHeader[] = "t_ms,ax_mg,ay_mg,az_mg,tx,ty,tz,lx,ly,lz,valid\n";
 
 // The boundary that ends the sector holding `addr`.
@@ -35,9 +40,20 @@ bool SetStore::begin(uint16_t bootId) {
       continue;
     }
     const uint32_t se = sectorEnd(off) < cap ? sectorEnd(off) : cap;
-    if (flash_.isErased(off, se - off)) break;  // the end of the records
-    skipped_ = true;  // a record cut short by a power loss, or data from before the store
-    off = se;
+    if (!flash_.isErased(off, se - off)) {
+      skipped_ = true;  // an abandoned record (abortRecord(), a power loss), or data from before the store
+      off = se;
+      continue;
+    }
+    // Erased from here to the end of the sector.
+    if (se - off < kMinSectorTail && se < cap) {
+      off = se;  // a sector's unused end (beginRecord()): what follows starts on the boundary
+      continue;
+    }
+    uint32_t next = 0;
+    if (!recordPastGap(off, cap, static_cast<uint16_t>(n + 1), &next)) break;  // the end of the records
+    skipped_ = true;
+    off = next;
   }
   flash_.close();
   if (!readOk) return false;
@@ -46,6 +62,27 @@ bool SetStore::begin(uint16_t bootId) {
   blankUpTo_ = sectorEnd(end_) < cap ? sectorEnd(end_) : cap;
   ready_ = true;
   return true;
+}
+
+// An erased stretch is the end of the records: a record that was abandoned leaves only non-erased
+// sectors behind (abortRecord()). Two cases can still put a record behind one, on a sector
+// boundary: a store written by firmware before that rule (its abortRecord() skipped to the boundary
+// after a write that may have programmed nothing), and an abandoned record whose extent could not
+// be read back. So the next kMaxGapSectors boundaries are tried, for the record with the next
+// index (records are numbered 1, 2, ... since the last clear, and an abandoned one takes no
+// number). A set from before a `clearsets` that the erase did not reach is not taken for it.
+bool SetStore::recordPastGap(uint32_t from, uint32_t cap, uint16_t index, uint32_t* at) {
+  uint32_t boundary = sectorEnd(from);
+  for (uint32_t i = 0; i < kMaxGapSectors && boundary + gym::kStoreHeaderBytes <= cap; i++, boundary += kSector) {
+    uint8_t raw[gym::kStoreHeaderBytes];
+    gym::StoredSetHeader h;
+    if (!flash_.read(boundary, raw, sizeof(raw))) return false;
+    if (gym::decodeStoredHeader(raw, cap - boundary, &h) && h.index == index) {
+      *at = boundary;
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- writing a record
@@ -71,15 +108,20 @@ const char* SetStore::beginRecord(uint32_t bodyBytes) {
   if (dumping()) return "a download (dumpall) is running";
   if (bodyBytes == 0) return "nothing was recorded";
   const uint32_t total = gym::storedRecordBytes(bodyBytes);
-  if (end_ + total > flash_.capacity()) return "the store is full - download the sets, then clearsets";
+  // A record's header and the start of its body share a sector: a record that is abandoned once
+  // its first page is in then leaves that sector non-erased, which is how the boot scan knows to
+  // step over it. So the last few bytes of a sector stay unused ([end_, at) is erased already).
+  uint32_t at = end_;
+  if (kSector - at % kSector < kMinSectorTail) at = sectorEnd(at);
+  if (at + total > flash_.capacity()) return "the store is full - download the sets, then clearsets";
   if (!flash_.open()) return "the flash did not answer";
-  if (!ensureBlank(end_ + total)) {
+  if (!ensureBlank(at + total)) {
     flash_.close();
     return "the flash could not be erased";
   }
   writing_ = true;
   programmed_ = false;
-  rec_ = end_;
+  rec_ = at;
   recBody_ = bodyBytes;
   recDone_ = 0;
   recCrc_ = 0;
@@ -132,6 +174,11 @@ bool SetStore::commit(gym::StoredSetHeader h) {
   // The header goes last: until it is in, the record does not exist for the scan.
   if (!writeFlash(rec_, raw, sizeof(raw)) || !flash_.read(rec_, back, sizeof(back)) ||
       memcmp(raw, back, sizeof(raw)) != 0) {
+    // The header may be in the flash, whole or in part. This record is reported as not saved, so
+    // it must never pass for one: clear the header to zeros (programming only clears bits, so that
+    // works on top of whatever is there).
+    static const uint8_t kZeros[gym::kStoreHeaderBytes] = {};
+    flash_.write(rec_, kZeros, sizeof(kZeros));
     abortRecord();
     return false;
   }
@@ -142,14 +189,46 @@ bool SetStore::commit(gym::StoredSetHeader h) {
   return true;
 }
 
+// The last byte in [from, to) that does not read erased (*any: there is one). false: the flash
+// could not be read.
+bool SetStore::lastProgrammed(uint32_t from, uint32_t to, bool* any, uint32_t* last) {
+  uint8_t chunk[64];
+  *any = false;
+  while (to > from) {
+    const size_t n = to - from < sizeof(chunk) ? to - from : sizeof(chunk);
+    if (!flash_.read(to - n, chunk, n)) return false;
+    for (size_t i = n; i-- > 0;) {
+      if (chunk[i] != 0xFF) {
+        *any = true;
+        *last = to - n + i;
+        return true;
+      }
+    }
+    to -= n;
+  }
+  return true;
+}
+
 void SetStore::abortRecord() {
   if (!writing_) return;
   writing_ = false;
   if (programmed_) {
-    // Part of this record may be in the flash. The next one starts on a fresh sector after it,
-    // where the boot scan finds it again after stepping over this one.
-    end_ = sectorEnd(lastWriteEnd_ - 1);
-    skipped_ = true;
+    // What of this record is in the flash? Nothing, if its one write failed outright: the next
+    // record then simply takes its place. Otherwise the next one starts on the sector boundary
+    // after the last programmed byte. Every sector from this record's first to that boundary is
+    // then non-erased (the body is written front to back, and its first page shares the header's
+    // sector), so the boot scan steps over all of them and finds the next record. If the flash
+    // cannot be read back, the last write is taken to have gone in.
+    bool any = false;
+    uint32_t last = 0;
+    if (!lastProgrammed(rec_, lastWriteEnd_, &any, &last)) {
+      any = true;
+      last = lastWriteEnd_ - 1;
+    }
+    if (any) {
+      end_ = sectorEnd(last);
+      skipped_ = true;
+    }
   }
   flash_.close();
 }
@@ -230,6 +309,10 @@ bool SetStore::startDump() {
 void SetStore::stopDump() {
   dump_ = kIdle;
   flash_.close();
+}
+
+void SetStore::cancelDump() {
+  if (dump_ != kIdle) stopDump();
 }
 
 void SetStore::pumpDump() {

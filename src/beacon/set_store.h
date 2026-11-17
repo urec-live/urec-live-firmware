@@ -8,8 +8,8 @@
 //
 // Writing a set takes about 0.1 s right after it ends, while the rep counter is idle; a rep in
 // that time is still counted (its interrupt waits), only a moment late. A record cut short by a
-// power loss is skipped: the next record starts on a fresh 4 KB sector, and the boot scan steps
-// over the damaged one.
+// power loss or a failed write is skipped: the next record starts on a fresh 4 KB sector, and the
+// boot scan steps over the damaged one to the records after it.
 #pragma once
 
 #include <Arduino.h>
@@ -46,10 +46,15 @@ class SetStore {
   bool startDump();
   bool dumping() const { return dump_ != kIdle; }
   void pumpDump();
+  // The USB host is gone (cable pulled mid-download): ends the dump and puts the flash back to
+  // sleep, so the store takes new sets again. pumpDump() is not called without USB power.
+  void cancelDump();
 
  private:
   enum DumpState : uint8_t { kIdle, kHeader, kMeta, kColumns, kRows, kCrc, kEnd };
 
+  bool recordPastGap(uint32_t from, uint32_t cap, uint16_t index, uint32_t* at);
+  bool lastProgrammed(uint32_t from, uint32_t to, bool* any, uint32_t* last);
   bool ensureBlank(uint32_t to);
   bool flushPage();
   bool writeFlash(uint32_t addr, const void* data, size_t len);

@@ -746,6 +746,11 @@ void WeightSensing::startDump() {
 
 bool WeightSensing::dumping() const { return dump_.section != kDumpIdle || s_store.dumping(); }
 
+void WeightSensing::cancelDump() {
+  dump_.section = kDumpIdle;
+  s_store.cancelDump();
+}
+
 void WeightSensing::pumpDump() {
   s_store.pumpDump();  // `dumpall`; never runs alongside the live dump
   if (dump_.section == kDumpIdle) return;

@@ -851,6 +851,10 @@ void loop() {
     g_weight.pumpDump();
   } else {
     g_hostConnected = false;
+    // The cable was pulled in the middle of a dump or a download: nothing pumps it any more. End
+    // it, or the set store would stay busy (and its flash awake) and refuse every set until USB
+    // power came back.
+    if (g_weight.dumping()) g_weight.cancelDump();
   }
   if (phoneJustListening) {
     ConsoleOut::Only phoneOnly(Console, ConsoleOut::kPhone);

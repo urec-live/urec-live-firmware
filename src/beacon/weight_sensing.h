@@ -60,6 +60,7 @@ class WeightSensing {
   void printSummary() const;  // the weight and store lines of the `s` status
   bool dumping() const;       // a CSV dump (`dump`) or a download (`dumpall`) is going to USB
   void pumpDump();  // writes as much of a pending CSV dump as the USB buffer takes
+  void cancelDump();  // USB power is gone: ends a dump or download, and frees the set store
 
  private:
   enum DumpSection : uint8_t { kDumpIdle, kDumpSummary, kDumpError, kDumpRest, kDumpMagRest, kDumpCounts,
