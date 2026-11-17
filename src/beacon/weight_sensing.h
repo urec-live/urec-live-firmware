@@ -54,7 +54,7 @@ class WeightSensing {
   void abortSet(uint32_t now, bool quiet = false);  // quiet: a wake with no rep, nothing to say
 
   // Console. fromPhone: the command came from the Bluetooth console, which may not erase the
-  // stored sets or start a download (both are USB-only).
+  // stored sets or all taught weights, or start a download (those are USB-only).
   bool command(const char* cmd, const char* arg, bool fromPhone);
   void printHelp() const;
   void printSummary() const;  // the weight and store lines of the `s` status

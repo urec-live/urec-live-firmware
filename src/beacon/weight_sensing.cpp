@@ -553,7 +553,7 @@ void WeightSensing::printHelp() const {
   Console.println(F("  mag                  magnetometer(s), field at rest, taught weights"));
   Console.println(F("  teach <w>            label the last set with weight w (teach 50, teach 12.5)"));
   Console.println(F("  weights              list the taught weights"));
-  Console.println(F("  forget <w>|all       delete a taught weight"));
+  Console.println(F("  forget <w>|all       delete a taught weight (all: USB only)"));
   Console.println(F("  dump                 print the last set as CSV (offline training)"));
   Console.println(F("  log                  toggle: dump every set automatically"));
   Console.println(F("  sets                 the set store: every recorded set, kept in flash"));
@@ -672,6 +672,10 @@ bool WeightSensing::command(const char* cmd, const char* arg, bool fromPhone) {
     const bool all = arg != nullptr && strcmp(arg, "all") == 0;
     if (!all && !parseLabel(arg, &label)) {
       Console.println(F("usage: forget <weight>|all"));
+      return true;
+    }
+    if (all && fromPhone) {  // like clearsets: the Bluetooth console has no pairing
+      Console.println(F("forget all works on the USB console only (forget <weight> works here)"));
       return true;
     }
     size_t removed = 0;
