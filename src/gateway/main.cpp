@@ -58,6 +58,11 @@ char g_bootId[9] = "00000000";  // random per boot: makes set keys unique across
 // Firebase: machines whose live state still has to be uploaded, and finished sets.
 bool g_fbLiveDirty[gym::MachineTracker::kMaxMachines] = {};
 bool g_fbBatteryDirty[gym::MachineTracker::kMaxMachines] = {};
+// After a (re)boot nothing is in use and no set is open, but Firebase still shows what was last
+// uploaded before it - "inUse": true and a live rep count, if the gateway restarted mid-set - and
+// only a machine's next change would correct it. So the first live upload writes every machine's
+// reps and inUse (not lastSetReps, setNumber or rssi, which a reboot does not make wrong).
+bool g_fbBootSync = true;
 uint32_t g_lastLivePatchMs = 0;
 uint32_t g_livePatchWaitMs = 0;  // 0 = upload as soon as something changes
 gym::SetRecord g_pendingSets[kMaxPendingSets];
@@ -144,7 +149,7 @@ void queueSet(const gym::SetRecord& rec) {
 // ---------------------------------------------------------------- Firebase
 
 void uploadLive(uint32_t now) {
-  bool any = false;
+  bool any = g_fbBootSync;
   for (size_t m = 0; m < kMachineCount; m++) any = any || g_fbLiveDirty[m] || g_fbBatteryDirty[m];
   if (!any || !elapsed(now, g_lastLivePatchMs, g_livePatchWaitMs)) return;
   g_lastLivePatchMs = now;
@@ -164,6 +169,12 @@ void uploadLive(uint32_t now) {
       doc[k + "lastSetReps"] = st.lastSetReps;
       doc[k + "rssi"] = st.rssi;
       doc[k + "updatedAt"][".sv"] = "timestamp";
+    } else if (g_fbBootSync) {
+      doc[k + "name"] = kMachines[m].name;
+      doc[k + "type"] = gym::equipmentName(kMachines[m].equipmentType);
+      doc[k + "reps"] = st.liveReps();
+      doc[k + "inUse"] = st.inUse;
+      doc[k + "updatedAt"][".sv"] = "timestamp";
     }
     if (g_fbBatteryDirty[m]) {
       doc[k + "battery/mv"] = st.batteryMv;
@@ -176,6 +187,7 @@ void uploadLive(uint32_t now) {
   serializeJson(doc, body);
   const int code = g_firebase.patch(GATEWAY_FIREBASE_ROOT "/machines", body);
   if (httpOk(code)) {
+    g_fbBootSync = false;
     for (size_t m = 0; m < kMachineCount; m++) {
       g_fbLiveDirty[m] = false;
       g_fbBatteryDirty[m] = false;
