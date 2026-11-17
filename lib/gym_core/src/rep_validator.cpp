@@ -361,6 +361,10 @@ void RepValidator::onCandidate(uint32_t nowMs) {
       return;
     }
   }
+  if (liftCounted(m)) {
+    reject(m, MoveVerdict::Superseded);  // ... or its first part did, before a stop part-way up
+    return;
+  }
   tryFast(m);
 }
 
@@ -416,6 +420,31 @@ float RepValidator::swingBase() const {
     }
   }
   return zloX_;
+}
+
+// A lift that stops part-way up and then finishes is two up-strokes (the stop ends the first), so
+// the same-stroke rule in onCandidate() does not see that its two dips are one lift, and the second,
+// also past the template by then, would count again. True if a dip since the valley under this rise
+// has already counted and the stack has not risen by another rep's worth since that dip's lift
+// ended. The second condition keeps counting when a slow lowering was taken for a hold, so that its
+// valley is missing: the next rep then sits a whole rep higher, on top of the last one.
+bool RepValidator::liftCounted(const Move& m) const {
+  if (zmode_ != 1) return false;  // no rise confirmed since the last peak
+  for (int32_t k = turnN_ - 1; k >= oldestTurn(); k--) {
+    if (turn(k).kind == kPeak) continue;
+    const int32_t base = turn(k).t;  // the valley (or the session's start) under this rise
+    const float n = need();
+    for (size_t i = 0; i < moveN_; i++) {
+      const Move& o = moves_[i];
+      if (&o == &m || !moveCounted(o.verdict) || o.t < base) continue;
+      if (o.stroke < 0 || o.stroke >= strokeN_ || o.stroke < strokeN_ - kStrokeRing) continue;
+      float gained = positionMm() - X_;  // the stroke in progress, then those since o's lift
+      for (int32_t j = o.stroke + 1; j < strokeN_; j++) gained += stroke(j).d;
+      if (gained < n) return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 void RepValidator::tryFast(Move& m) {

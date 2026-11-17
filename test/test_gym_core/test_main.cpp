@@ -1540,6 +1540,20 @@ void test_val_fast_path_timing() {
   TEST_ASSERT_EQUAL_UINT16(6, s_res.publishedAtDip[5]);
 }
 
+void test_val_two_stage_lift_counts_once() {
+  // Rep 5 stops part-way up, past half the travel, and then finishes: the stop and the top are two
+  // dips (the re-start re-arms the counter), but one rise. Both are past the template by then.
+  const float stopAtMm[] = {250.0f, 350.0f};
+  for (float at : stopAtMm) {
+    StackScript s;
+    s.reps(4, 450.0f).move(at, 0.7f).hold(0.6f).move(450.0f, 0.6f).move(0.0f, 1.2f).reps(3, 450.0f);
+    simulate(s, BeaconSim());
+    TEST_ASSERT_EQUAL_UINT16(9, s_res.dips);
+    TEST_ASSERT_EQUAL_UINT16(8, s_res.published);
+    TEST_ASSERT_EQUAL_UINT32(1, countVerdict(MoveVerdict::Superseded));
+  }
+}
+
 void test_val_accelerometer_bias() {
   BeaconSim b;
   b.biasMg = 5.0f;  // the resting reading includes it, the motion does not
@@ -1651,6 +1665,7 @@ void setup() {
   RUN_TEST(test_val_wake_missed_counts_first_dip_unchecked);
   RUN_TEST(test_val_single_cycle_counts_one);
   RUN_TEST(test_val_fast_path_timing);
+  RUN_TEST(test_val_two_stage_lift_counts_once);
   RUN_TEST(test_val_accelerometer_bias);
   RUN_TEST(test_val_rocking_still_counts);
   RUN_TEST(test_val_flipped_beacon_tilted);

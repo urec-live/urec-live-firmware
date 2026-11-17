@@ -158,6 +158,7 @@ class RepValidator {
   void decide(Move& m);
   void reject(Move& m, MoveVerdict why);
   void count(Move& m, MoveVerdict how);
+  bool liftCounted(const Move& m) const;
   void tryFast(Move& m);
   float need() const;
   float swingBase() const;
