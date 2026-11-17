@@ -48,6 +48,9 @@ bool certainlyNotApplied(int code) {
          code == HTTPC_ERROR_SEND_PAYLOAD_FAILED || (code >= 300 && code < 500);
 }
 
+// The tracker, and the arrays below, have one slot per machine, at most kMaxMachines of them.
+static_assert(kMachineCount <= gym::MachineTracker::kMaxMachines,
+              "too many machines in kMachines (gateway_config.h): raise MachineTracker::kMaxMachines");
 gym::MachineTracker g_tracker(kMachineCount, trackerConfig());
 FirebaseClient g_firebase;
 UrecClient g_urec;
