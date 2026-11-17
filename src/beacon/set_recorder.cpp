@@ -47,6 +47,7 @@ void rotateRows(int16_t (*a)[3], size_t n, size_t by) {
 void SetRecorder::clear(uint32_t nowMs) {
   head_ = 0;
   n_ = 0;
+  headMs_ = nowMs;
   wrapped_ = false;
   startMs_ = nowMs;
   lastAddMs_ = nowMs;
@@ -54,15 +55,26 @@ void SetRecorder::clear(uint32_t nowMs) {
   countRel_ = 0;
 }
 
+void SetRecorder::dropOldest() {
+  const size_t next = (head_ + 1) % kRecorderSamples;
+  if (n_ > 1) headMs_ += static_cast<uint16_t>(s_t[next] - s_t[head_]);
+  head_ = next;
+  n_--;
+  wrapped_ = true;
+}
+
 void SetRecorder::add(uint32_t nowMs, const int16_t accMg[3], const int16_t b[][3], uint8_t validBits) {
-  size_t i;
-  if (n_ < kRecorderSamples) {
-    i = n_++;
-  } else {  // full: overwrite the oldest sample
-    i = head_;
-    head_ = (head_ + 1) % kRecorderSamples;
+  if (n_ > 0 && nowMs - lastAddMs_ >= kRecorderMaxSpanMs) {
+    // A gap longer than the ring may span (the loop was held up for a minute): everything before
+    // it is too old to keep, and the 16-bit times could not tell how old.
+    head_ = 0;
+    n_ = 0;
     wrapped_ = true;
   }
+  if (n_ == kRecorderSamples) dropOldest();  // full: the new sample replaces the oldest
+  if (n_ == 0) headMs_ = nowMs;
+  const size_t i = (head_ + n_) % kRecorderSamples;
+  n_++;
   s_t[i] = static_cast<uint16_t>(nowMs - startMs_);
   for (uint8_t a = 0; a < 3; a++) s_acc[i][a] = accMg[a];
   for (uint8_t k = 0; k < kMaxMagnetometers; k++) {
@@ -70,6 +82,7 @@ void SetRecorder::add(uint32_t nowMs, const int16_t accMg[3], const int16_t b[][
   }
   s_flags[i] = validBits;
   lastAddMs_ = nowMs;
+  while (n_ > 1 && nowMs - headMs_ > kRecorderMaxSpanMs) dropOldest();  // keep the span 16-bit
 }
 
 // Counted reps may arrive late and out of order (the rep check counts the first two together):
@@ -85,14 +98,15 @@ void SetRecorder::addCount(uint32_t nowMs) {
 }
 
 void SetRecorder::finish(uint32_t lastEventMs, gym::SetData* d) {
-  if (head_ != 0) {
-    rotate(s_t, n_, head_);
-    rotateRows(s_acc, n_, head_);
-    for (uint8_t k = 0; k < kMaxMagnetometers; k++) rotateRows(s_mag[k], n_, head_);
-    rotate(s_flags, n_, head_);
+  if (head_ != 0) {  // the whole buffer, so that a ring that wrapped and then dropped by time works too
+    rotate(s_t, kRecorderSamples, head_);
+    rotateRows(s_acc, kRecorderSamples, head_);
+    for (uint8_t k = 0; k < kMaxMagnetometers; k++) rotateRows(s_mag[k], kRecorderSamples, head_);
+    rotate(s_flags, kRecorderSamples, head_);
     head_ = 0;
   }
-  // Times relative to the first kept sample. The span is under 65.5 s, so 16-bit differences hold.
+  // Times relative to the first kept sample. The span is at most kRecorderMaxSpanMs (add()), under
+  // 65.5 s, so 16-bit differences hold.
   const uint16_t t0 = n_ > 0 ? s_t[0] : 0;
   const uint16_t span = n_ > 0 ? static_cast<uint16_t>(s_t[n_ - 1] - t0) : 0;
   for (size_t i = 0; i < n_; i++) s_t[i] = static_cast<uint16_t>(s_t[i] - t0);

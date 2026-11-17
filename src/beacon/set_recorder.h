@@ -4,6 +4,11 @@
 // The buffer is a ring: a set longer than BEACON_W8_MAX_SET_S keeps its last part, because that
 // part holds the stack at rest after the last rep, which the pipeline needs. finish() lays the ring
 // out oldest-first and turns every time into "ms since the first kept sample".
+//
+// "Longer" is in time as well as in samples: when samples come slower than 50 Hz (a sensor clock
+// that runs slow, samples the accelerometer did not have ready), 3000 of them would span more than
+// the 65.5 s that the 16-bit sample times can hold. So the oldest are also dropped once the ring
+// spans more than kRecorderMaxSpanMs.
 #pragma once
 
 #include <stddef.h>
@@ -13,10 +18,13 @@
 #include "weight_pipeline.h"
 
 const size_t kRecorderSamples = static_cast<size_t>(BEACON_W8_MAX_SET_S) * 50;
+// 2 s above the nominal span, so that at 50 Hz the sample count decides, as it always has.
+const uint32_t kRecorderMaxSpanMs = static_cast<uint32_t>(BEACON_W8_MAX_SET_S) * 1000 + 2000;
 const size_t kRecorderMaxCounts = 100;
 
 // Sample times are stored as 16-bit ms, so a recording must span well under 65.5 s.
 static_assert(BEACON_W8_MAX_SET_S <= 60, "BEACON_W8_MAX_SET_S must be at most 60");
+static_assert(kRecorderMaxSpanMs < 65536, "the recording's span must fit 16-bit ms");
 
 class SetRecorder {
  public:
@@ -46,8 +54,11 @@ class SetRecorder {
   int32_t relMs(uint32_t ms) const { return static_cast<int32_t>(ms - firstMs_); }
 
  private:
+  void dropOldest();
+
   size_t head_ = 0;          // oldest sample
   size_t n_ = 0;
+  uint32_t headMs_ = 0;      // millis() of the oldest sample
   bool wrapped_ = false;
   uint32_t startMs_ = 0;     // millis() at clear(); stored times are relative to it (mod 2^16)
   uint32_t lastAddMs_ = 0;
