@@ -87,7 +87,8 @@ struct UrecSync {
 UrecSync g_urecSync[gym::MachineTracker::kMaxMachines] = {};
 bool g_bootChecksDone = false;
 
-uint32_t g_unknownBeacons[8];  // (type << 8 | instance) already reported
+const size_t kMaxUnknownBeacons = 8;
+uint32_t g_unknownBeacons[kMaxUnknownBeacons];  // (type << 8 | instance) already reported
 size_t g_unknownCount = 0;
 uint32_t g_lastScanCheckMs = 0;
 
@@ -103,9 +104,13 @@ void noteUnknownBeacon(const BeaconPacket& p) {
   for (size_t i = 0; i < g_unknownCount; i++) {
     if (g_unknownBeacons[i] == key) return;
   }
-  if (g_unknownCount < sizeof(g_unknownBeacons) / sizeof(g_unknownBeacons[0])) g_unknownBeacons[g_unknownCount++] = key;
+  // Once the list is full, further unknown beacons are not reported: each of their packets would
+  // otherwise print a line (several a second per beacon, with other gateways' beacons in range).
+  if (g_unknownCount == kMaxUnknownBeacons) return;
+  g_unknownBeacons[g_unknownCount++] = key;
   Serial.printf("[ble] GetMeFit beacon %s #%u is not in kMachines (gateway_config.h) - ignored\n",
                 gym::equipmentName(p.equipmentType), p.machineInstance);
+  if (g_unknownCount == kMaxUnknownBeacons) Serial.println("[ble] (further unknown beacons are not reported)");
 }
 
 // The paper's "repetition vector", one slot per configured machine.
