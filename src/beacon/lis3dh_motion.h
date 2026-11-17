@@ -22,21 +22,23 @@ class Lis3dhMotion {
   bool begin(TwoWire& wire, uint8_t address);
 
   // 50 Hz, normal mode (10-bit, 4 mg), +/-2 g, BDU, HP filter off, IA1 and IA2 -> INT1 latched,
-  // both disabled.
-  void configureBase();
+  // both disabled. false: the sensor did not acknowledge a write.
+  bool configureBase();
 
   // Arms interrupt 1 for |a_axis| > thresholdMg (high) or < thresholdMg (!high), held for
   // `duration` samples. Order: CFG=0, THS, DUR, CFG. The caller then clears INT1_SRC.
-  void arm(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration);
-  void disarm();
+  // false: the sensor did not acknowledge a write, so the interrupt may not be set up (or off):
+  // the caller must not take it as armed, and tries again.
+  bool arm(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration);
+  bool disarm();
 
   // Reading INT1_SRC returns which condition fired (IA set) and clears the latched INT1 pin.
   uint8_t readInt1Source();
 
   // Interrupt 2, the same way (it shares the INT1 pin): the wake on a lift starting. The pin stays
   // high while either generator is latched, so read both sources when it rises.
-  void armWake(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration);
-  void disarmWake();
+  bool armWake(uint8_t axis, bool high, uint16_t thresholdMg, uint8_t duration);
+  bool disarmWake();
   uint8_t readInt2Source();
 
   // Burst read of STATUS_REG + OUT_X/Y/Z (L and H, as BDU requires). `fresh` = new XYZ data.
@@ -54,7 +56,7 @@ class Lis3dhMotion {
   }
 
  private:
-  void write(uint8_t reg, uint8_t value);
+  bool write(uint8_t reg, uint8_t value);
   uint8_t read(uint8_t reg);
 
   TwoWire* wire_ = nullptr;

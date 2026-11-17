@@ -111,6 +111,7 @@ PhaseSpec g_rearmSpec = {};
 bool g_hwArmed = false;
 gym::RepPhase g_hwPhase = gym::RepPhase::Count;
 volatile bool g_serviceNow = false;  // INT1 was found high without an edge: handle it now
+bool g_armFailed = false;            // the LIS3DH did not acknowledge an interrupt setup (said once)
 
 gym::BeaconFrame g_lastFrame = {};
 bool g_repeatPending = false;
@@ -172,6 +173,13 @@ void blinkError() {
   }
 }
 
+// The LIS3DH did not acknowledge an interrupt setup (a jumper shaken loose for a moment): said
+// once, not on every retry.
+void noteArmResult(bool ok) {
+  if (!ok && !g_armFailed) LOG("[err] LIS3DH did not acknowledge its interrupt setup - trying again\n");
+  g_armFailed = !ok;
+}
+
 // Arms LIS3DH interrupt 1 for whatever the counter waits for. Every (re)configuration ends the
 // same way: clear the latch, drop the edge it may have produced, and look at the pin, because a
 // latched INT1 that is already high never produces another rising edge.
@@ -180,13 +188,12 @@ void blinkError() {
 void syncWake(bool force = false) {
   const bool want = g_cal.valid && g_settings.mode == MotionMode::Stack && !g_counter.active();
   if (!force && want == g_wakeArmed) return;
-  if (want) {
-    g_imu.armWake(g_cal.axis, true, g_cal.restMg + BEACON_WAKE_DELTA_MG, 2);
-  } else {
-    g_imu.disarmWake();
-  }
+  const bool ok = want ? g_imu.armWake(g_cal.axis, true, g_cal.restMg + BEACON_WAKE_DELTA_MG, 2) : g_imu.disarmWake();
   (void)g_imu.readInt2Source();
-  g_wakeArmed = want;
+  // Not acknowledged: leave it marked as what it should not be, so the next pass of loop() sets
+  // it up again.
+  g_wakeArmed = ok ? want : !want;
+  noteArmResult(ok);
   if (digitalRead(BEACON_INT_PIN) == HIGH) g_serviceNow = true;
 }
 
@@ -200,15 +207,20 @@ void syncArm(bool force = false) {
     if (want == gym::RepPhase::Count) spec = &g_countSpec;
     if (want == gym::RepPhase::Rearm) spec = &g_rearmSpec;
   }
+  bool ok;
   if (spec != nullptr && spec->valid) {
-    g_imu.arm(g_cal.axis, spec->high, spec->thresholdMg, spec->duration);
+    ok = g_imu.arm(g_cal.axis, spec->high, spec->thresholdMg, spec->duration);
   } else {
-    g_imu.disarm();  // hold-off, or no usable calibration
+    ok = g_imu.disarm();  // hold-off, or no usable calibration
   }
   (void)g_imu.readInt1Source();
   xSemaphoreTake(g_intSem, 0);
   g_hwPhase = want;
-  g_hwArmed = true;
+  // Not acknowledged: the sensor may still be set up for the old phase, or for nothing. Leaving
+  // it marked "not armed" makes the next pass of loop() do all of this again; without that the
+  // beacon would wait forever for an interrupt that is not armed.
+  g_hwArmed = ok;
+  noteArmResult(ok);
   if (digitalRead(BEACON_INT_PIN) == HIGH) g_serviceNow = true;
 }
 
