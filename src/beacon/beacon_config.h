@@ -12,7 +12,7 @@
 #define BEACON_EQUIPMENT_TYPE gym::kEquipLegCurl
 #define BEACON_MACHINE_INSTANCE 1  // 1..255: Leg Curl #1 -> LC001
 
-// ---- Wiring (beacon-breadboard-schematic.md §8) -----------------------------------------------
+// ---- Wiring (docs/beacon-breadboard-schematic.md §8) -----------------------------------------------
 #define BEACON_INT_PIN 5        // Feather D5 (H14) <- LIS3DH INT1 (F23), jumper H23 -> I14
 #define BEACON_LIS3DH_ADDR 0x18
 
